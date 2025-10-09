@@ -165,6 +165,85 @@ def compute_vgi(df: pd.DataFrame) -> pd.DataFrame:
     out.replace([float("inf"), -float("inf")], pd.NA, inplace=True)
     return out
 
+def estimate_revenue(cf: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create estimated_revenue_eur, rev_source, confidence
+    from available columns: revenue_last_fy_eur, arr_eur, mrr_eur, gmv_eur,
+    assumed_take_rate_pct, headcount.
+    """
+    df = cf.copy()
+
+    # Ensure optional cols exist
+    for c in ["arr_eur", "mrr_eur", "gmv_eur", "assumed_take_rate_pct", "headcount"]:
+        if c not in df.columns:
+            df[c] = pd.NA
+
+    # Normalize numerics
+    num_cols = ["revenue_last_fy_eur", "arr_eur", "mrr_eur", "gmv_eur", "assumed_take_rate_pct", "headcount"]
+    for c in num_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    est = pd.Series(pd.NA, index=df.index, dtype="float")
+    src = pd.Series(pd.NA, index=df.index, dtype="string")
+    conf = pd.Series(pd.NA, index=df.index, dtype="string")
+
+    # 1) Audited/last FY revenue
+    mask = df["revenue_last_fy_eur"].notna() & (df["revenue_last_fy_eur"] > 0)
+    est[mask] = df.loc[mask, "revenue_last_fy_eur"]
+    src[mask] = "audited_revenue"
+    conf[mask] = "High"
+
+    # 2) ARR
+    mask = est.isna() & df["arr_eur"].notna() & (df["arr_eur"] > 0)
+    est[mask] = df.loc[mask, "arr_eur"]
+    src[mask] = "ARR"
+    conf[mask] = "Medium-High"
+
+    # 3) MRR x 12
+    mask = est.isna() & df["mrr_eur"].notna() & (df["mrr_eur"] > 0)
+    est[mask] = df.loc[mask, "mrr_eur"] * 12.0
+    src[mask] = "MRRx12"
+    conf[mask] = "Medium"
+
+    # 4) GMV x take-rate (use defaults if missing)
+    default_take = {
+        "Consumer": 8.0,   # marketplaces
+        "Fintech": 2.0,    # payments
+        "B2B SaaS": 100.0, # GMV rarely applies; if present assume it's revenue
+        "AI-native": 100.0,
+        "Healthtech": 30.0,
+        "Climate": 20.0,
+        "Deeptech": 100.0
+    }
+    take = df["assumed_take_rate_pct"].copy()
+    take = take.where(take.notna(), df["sector"].map(default_take))
+    mask = est.isna() & df["gmv_eur"].notna() & (df["gmv_eur"] > 0) & take.notna()
+    est[mask] = df.loc[mask, "gmv_eur"] * (take[mask] / 100.0)
+    src[mask] = "GMVxTakeRate"
+    conf[mask] = "Low-Med"
+
+    # 5) Headcount model (rough sector benchmarks for revenue/employee)
+    rev_per_emp = {
+        "B2B SaaS": 160000.0,
+        "AI-native": 150000.0,
+        "Fintech": 180000.0,
+        "Consumer": 120000.0,
+        "Healthtech": 170000.0,
+        "Climate": 200000.0,
+        "Deeptech": 220000.0,
+    }
+    bench = df["sector"].map(rev_per_emp)
+    mask = est.isna() & df["headcount"].notna() & (df["headcount"] > 0) & bench.notna()
+    est[mask] = df.loc[mask, "headcount"] * bench[mask]
+    src[mask] = "HeadcountModel"
+    conf[mask] = "Low"
+
+    df["estimated_revenue_eur"] = est
+    df["rev_source"] = src
+    df["confidence"] = conf
+    return df
+
 def compute_startup_vgi(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
     """Per-startup VGI = (startup EV/Rev) / (sector public EV/Rev)."""
     per = cf.copy()
