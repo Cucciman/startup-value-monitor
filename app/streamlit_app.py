@@ -378,7 +378,6 @@ def main():
 
         if used.empty:
             st.info("No startups with a valid VGI in this sector yet (need non-zero revenue and a public median).")
-        else:
 else:
     # Format numbers and rename columns for readability
     formatted = (
