@@ -245,23 +245,33 @@ def estimate_revenue(cf: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def compute_startup_vgi(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
-    """Per-startup VGI = (startup EV/Rev) / (sector public EV/Rev)."""
-    per = cf.copy()
+    """Per-startup VGI = (startup EV/Rev) / (sector public EV/Rev),
+    using estimated revenue with confidence tiers."""
+    # Enrich with estimated revenue and confidence
+    per = estimate_revenue(cf)
+
+    # Normalize startup column name
     if "startup" not in per.columns and "startup_name" in per.columns:
         per = per.rename(columns={"startup_name": "startup"})
-    for c in ["valuation_pre_money_eur", "revenue_last_fy_eur"]:
+
+    # Ensure numeric types
+    for c in ["valuation_pre_money_eur", "estimated_revenue_eur"]:
         if c in per.columns:
             per[c] = pd.to_numeric(per[c], errors="coerce")
-    if "revenue_last_fy_eur" in per.columns:
-        per.loc[per["revenue_last_fy_eur"] <= 0, "revenue_last_fy_eur"] = pd.NA
-    per["startup_ev_rev"] = per.get("valuation_pre_money_eur") / per.get("revenue_last_fy_eur")
 
-    pub = sector_public_median_by_consistent_method(pc, min_n=1)  # MVP: 1
+    # Avoid division by zero / negatives
+    per.loc[per["estimated_revenue_eur"] <= 0, "estimated_revenue_eur"] = pd.NA
+
+    # CF proxy EV/Rev per startup (now uses estimated revenue)
+    per["startup_ev_rev"] = per.get("valuation_pre_money_eur") / per.get("estimated_revenue_eur")
+
+    # Use the SAME consistent public medians per sector (MVP: min_n=1)
+    pub = sector_public_median_by_consistent_method(pc, min_n=1)
+
     out = per.merge(pub[["sector", "public_median_ev_rev"]], on="sector", how="left")
     out["VGI"] = out["startup_ev_rev"] / out["public_median_ev_rev"]
     out.replace([float("inf"), -float("inf")], pd.NA, inplace=True)
     return out
-
 # ---------------------------- UI ---------------------------------------------
 
 def main():
