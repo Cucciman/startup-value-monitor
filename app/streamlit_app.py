@@ -416,15 +416,15 @@ def main():
                 "Revenue source","Confidence","Platform","Round date"
             ] if c in formatted.columns]
 
-            st.dataframe(formatted[display_cols], use_container_width=True)           
-            csv = table.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label=f"Download startups used for {chosen} (CSV)",
-                data=csv,
-                file_name=f"vgi_startups_{chosen}.csv",
-                mime="text/csv",
-            )
-
+            st.dataframe(formatted[display_cols], use_container_width=True)
+           
+csv = formatted[display_cols].to_csv(index=False).encode("utf-8")
+st.download_button(
+    label=f"Download startups used for {chosen} (CSV)",
+    data=csv,
+    file_name=f"vgi_startups_{chosen}.csv",
+    mime="text/csv",
+)
         # Transparency: which public comps were used for this sector’s median?
         st.markdown("**Public comps used for this sector’s median (method-consistent)**")
         pc_med = sector_public_median_by_consistent_method(pc, min_n=1)
