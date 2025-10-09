@@ -1,0 +1,6 @@
+streamlit
+pandas
+altair
+yfinance
+beautifulsoup4
+requests

@@ -1,0 +1,3 @@
+ticker,name,country,sector,market_cap_eur,enterprise_value_eur,revenue_ttm_eur,ev_to_revenue,pe_ttm,data_date
+ADYEN.AS,Adyen NV,Netherlands,Fintech,56000000000,57000000000,5800000000,9.83,70.2,2025-10-07
+WIX,WiX.com Ltd,Israel,SaaS,11000000000,10800000000,1600000000,6.75,38.5,2025-10-07
