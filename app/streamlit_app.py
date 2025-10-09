@@ -5,11 +5,36 @@ import streamlit as st
 
 DATA_DIR = pathlib.Path(__file__).resolve().parents[1] / 'data'
 
+def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFrame:
+    if col in df.columns:
+        # light normalization to avoid mismatches like "SaAS" vs "SaaS"
+        df[col] = (
+            df[col]
+            .astype(str)
+            .str.strip()
+            .str.replace("SaAS", "SaaS", case=False)
+            .str.replace("Saas", "SaaS", case=False)
+        )
+    return df
+
 @st.cache_data
 def load_data():
+    # Crowdfunding (still sample for now)
     cf = pd.read_csv(DATA_DIR / 'crowdfunding_sample.csv', parse_dates=['round_date'])
-    pc = pd.read_csv(DATA_DIR / 'public_comps_sample.csv')
-    return cf, pc
+    cf = _normalize_sector_names(cf)
+
+    # Prefer live public comps if present; fall back to sample
+    public_primary = DATA_DIR / 'public_comps.csv'
+    public_fallback = DATA_DIR / 'public_comps_sample.csv'
+    if public_primary.exists():
+        pc = pd.read_csv(public_primary)
+        source = "public_comps.csv (live)"
+    else:
+        pc = pd.read_csv(public_fallback)
+        source = "public_comps_sample.csv (sample)"
+    pc = _normalize_sector_names(pc)
+
+    return cf, pc, source
 
 def sector_summary(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
     cf_sect = (
@@ -32,6 +57,7 @@ def sector_summary(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
 
 def compute_vgi(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+    # demo proxy: crowdfunding EV/Revenue ≈ premoney / last FY revenue
     out['cf_ev_rev'] = out['cf_median_pre_money'] / out['cf_median_revenue']
     out['VGI'] = out['cf_ev_rev'] / out['public_median_ev_rev']
     return out
@@ -39,15 +65,17 @@ def compute_vgi(df: pd.DataFrame) -> pd.DataFrame:
 def main():
     st.set_page_config(page_title='Startup Value Monitor', layout='wide')
     st.title('Startup Value Monitor — VGI (MVP)')
-    st.caption('Comparing crowdfunding valuations with public-market multiples (sample data).')
+    st.caption('Comparing crowdfunding valuations with public-market multiples.')
 
-    cf, pc = load_data()
+    cf, pc, source = load_data()
+    st.caption(f"Public comps source: {source}")
+
     df = compute_vgi(sector_summary(cf, pc))
 
     c1, c2 = st.columns([2, 1], vertical_alignment="center")
     with c1:
         st.subheader('Valuation Gap Index (by sector)')
-        bar = alt.Chart(df).mark_bar().encode(
+        bar = alt.Chart(df.dropna(subset=['VGI'])).mark_bar().encode(
             x=alt.X('sector', sort='-y', title='Sector'),
             y=alt.Y('VGI', title='VGI = CF EV/Rev ÷ Public EV/Rev'),
             tooltip=['sector',
@@ -57,11 +85,11 @@ def main():
         )
         st.altair_chart(bar, use_container_width=True)
     with c2:
-        st.metric('Median VGI (all sectors)', f"{df['VGI'].median():.2f}")
+        st.metric('Median VGI (all sectors)', f"{df['VGI'].median(skipna=True):.2f}")
 
     st.markdown('---')
     st.subheader('Crowdfunding Pre-Money vs Public EV/Revenue (by sector)')
-    scatter = alt.Chart(df).mark_circle(size=140).encode(
+    scatter = alt.Chart(df.dropna(subset=['public_median_ev_rev', 'cf_median_pre_money'])).mark_circle(size=140).encode(
         x=alt.X('public_median_ev_rev', title='Public EV/Revenue (median)'),
         y=alt.Y('cf_median_pre_money', title='Crowdfunding Pre-Money (median, €)'),
         tooltip=['sector',
@@ -73,9 +101,9 @@ def main():
 
     st.markdown('---')
     st.write("**Notes**")
-    st.write("- This uses sample CSVs in `data/`. Replace with real scrapes/APIs.")
-    st.write("- VGI here is a proxy for demo; production should compute EV/Revenue per round, then aggregate.")
-    st.write("- All values normalized to EUR in the pipeline (coming next).")
+    st.write("- Public comps now read from `data/public_comps.csv` when available (yfinance).")
+    st.write("- This demo uses sample crowdfunding CSVs; we’ll replace them with real data next.")
+    st.write("- In production, compute EV/Revenue per round and aggregate by sector/country.")
 
 if __name__ == '__main__':
     main()
