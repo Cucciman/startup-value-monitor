@@ -135,13 +135,28 @@ def sector_summary(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
               'revenue_last_fy_eur':'cf_median_revenue'
           })
     )
+    # Use consistent method per sector, but allow min_n=1 for MVP coverage
     pc_med = sector_public_median_by_consistent_method(pc, min_n=1)
     return cf_sect.merge(pc_med, on='sector', how='left')
 
-def compute_vgi(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out['cf_ev_rev'] = out['cf_median_pre_money'] / out['cf_median_revenue']
-    out['VGI'] = out['cf_ev_rev'] / out['public_median_ev_rev']
+
+def compute_startup_vgi(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
+    """Compute VGI for each startup (CF EV/Rev ÷ public median EV/Rev), safely."""
+    per = cf.copy()
+    if "startup" not in per.columns and "startup_name" in per.columns:
+        per = per.rename(columns={"startup_name": "startup"})
+    for c in ["valuation_pre_money_eur", "revenue_last_fy_eur"]:
+        if c in per.columns:
+            per[c] = pd.to_numeric(per[c], errors="coerce")
+    if "revenue_last_fy_eur" in per.columns:
+        per.loc[per["revenue_last_fy_eur"] <= 0, "revenue_last_fy_eur"] = pd.NA
+    per["startup_ev_rev"] = per.get("valuation_pre_money_eur") / per.get("revenue_last_fy_eur")
+
+    # Use the SAME consistent public medians per sector with min_n=1
+    pub = sector_public_median_by_consistent_method(pc, min_n=1)
+    out = per.merge(pub[["sector","public_median_ev_rev"]], on="sector", how="left")
+    out["VGI"] = out["startup_ev_rev"] / out["public_median_ev_rev"]
+    out.replace([float("inf"), -float("inf")], pd.NA, inplace=True)
     return out
 
 # --- Top 5 / Bottom 5 helpers (robust) ----------------------------------------
