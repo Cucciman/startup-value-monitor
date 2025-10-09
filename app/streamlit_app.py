@@ -435,3 +435,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Initialize placeholder Series with nullable types
+est = pd.Series(pd.NA, index=df.index, dtype="Float64")  # nullable float
+src = pd.Series(pd.NA, index=df.index, dtype="string")   # pandas string dtype
+conf = pd.Series(pd.NA, index=df.index, dtype="string")  # pandas string dtype
+
