@@ -139,6 +139,18 @@ def sector_summary(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
     pc_med = sector_public_median_by_consistent_method(pc, min_n=1)
     return cf_sect.merge(pc_med, on='sector', how='left')
 
+def compute_vgi(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute sector-level VGI = (CF EV/Rev) / (Public EV/Rev)."""
+    out = df.copy()
+    # CF EV/Rev proxy = median pre-money / median last FY revenue
+    out["cf_ev_rev"] = pd.to_numeric(out.get("cf_median_pre_money"), errors="coerce") / pd.to_numeric(
+        out.get("cf_median_revenue"), errors="coerce"
+    )
+    out["VGI"] = out["cf_ev_rev"] / pd.to_numeric(out.get("public_median_ev_rev"), errors="coerce")
+    # Clean infs
+    out.replace([float("inf"), -float("inf")], pd.NA, inplace=True)
+    return out
+
 def compute_startup_vgi(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
     """Compute VGI for each startup (CF EV/Rev ÷ public median EV/Rev), safely."""
     per = cf.copy()
