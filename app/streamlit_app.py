@@ -275,6 +275,17 @@ def main():
     sectors = sorted(per_startup["sector"].dropna().unique().tolist())
     st.caption(f"Startups with valid VGI: {per_startup['VGI'].notna().sum()}")
 
+per_startup = compute_startup_vgi(cf, pc)
+sectors = sorted(per_startup["sector"].dropna().unique().tolist())
+st.caption(f"Startups with valid VGI: {per_startup['VGI'].notna().sum()}")
+
+    # --- Diagnostics: why only 1 row shows per sector -------------------------
+    with st.expander("Diagnostics: VGI availability by sector"):
+        diag = per_startup.copy()
+        ...
+        st.dataframe(bad[cols].head(20))
+    # --------------------------------------------------------------------------
+
     if not sectors:
         st.info("No sectors available yet. Add crowdfunding rows and public comps, then rerun.")
     else:
