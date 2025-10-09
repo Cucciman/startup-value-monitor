@@ -8,3 +8,19 @@ SAP.DE,SaAS,Germany,Enterprise software
 ORSTED.CO,Climate Tech,Denmark,Renewables developer
 VWS.CO,Climate Tech,Denmark,Wind turbines
 NIBE-B.ST,Climate Tech,Sweden,Heat pumps & efficiency
+# Healthtech
+SHL.DE,Healthtech,Germany,Siemens Healthineers
+PHIA.AS,Healthtech,Netherlands,Philips
+TDOC,Healthtech,USA,Telehealth
+# Deeptech
+ASML.AS,Deeptech,Netherlands,Semiconductor equipment
+BESI.AS,Deeptech,Netherlands,Backend semiconductors
+AIR.PA,Deeptech,France,Aerospace
+# Consumer
+ZAL.DE,Consumer,Germany,E-commerce fashion
+HFG.DE,Consumer,Germany,Meal kits
+ROO.L,Consumer,United Kingdom,Food delivery
+# AI-native
+AI,AI-native,USA,C3.ai
+PATH,AI-native,USA,UiPath (automation)
+DARK.L,AI-native,United Kingdom,Darktrace (cyber AI)
