@@ -1,37 +1,127 @@
-import streamlit as st
 import pandas as pd
 import altair as alt
-from datetime import datetime
+import pathlib
+import streamlit as st
 
+DATA_DIR = pathlib.Path(__file__).resolve().parents[1] / 'data'
 
-# -------------------------------------------------------------------
-# Data loading and helper utilities
-# -------------------------------------------------------------------
+# --- Normalize sector taxonomy -------------------------------------------------
+def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFrame:
+    """
+    Map assorted sector labels into a canonical Sifted-style taxonomy:
+    {Fintech, B2B SaaS, Climate, Deeptech, Healthtech, Consumer, AI-native}
+    """
+    if col not in df.columns:
+        return df
+    raw = (
+        df[col].astype(str)
+        .str.strip()
+        .str.replace(r"\s+", " ", regex=True)
+    )
+    mapping = {
+        # SaaS
+        "saas": "B2B SaaS", "SaaS": "B2B SaaS", "SaAS": "B2B SaaS", "software": "B2B SaaS",
+        "enterprise software": "B2B SaaS",
+        # Climate
+        "climate": "Climate", "Climate Tech": "Climate", "climatetech": "Climate",
+        "greentech": "Climate", "cleantech": "Climate", "energy": "Climate", "renewables": "Climate",
+        # Fintech
+        "fintech": "Fintech", "FinTech": "Fintech", "Fin tech": "Fintech", "payments": "Fintech",
+        # Deeptech
+        "deeptech": "Deeptech", "DeepTech": "Deeptech", "Deep tech": "Deeptech",
+        "semiconductors": "Deeptech", "robotics": "Deeptech", "space": "Deeptech",
+        # Healthtech
+        "healthtech": "Healthtech", "HealthTech": "Healthtech", "digital health": "Healthtech",
+        "medtech": "Healthtech", "biotech": "Healthtech",
+        # Consumer
+        "consumer": "Consumer", "ConsumerTech": "Consumer", "ecommerce": "Consumer",
+        "marketplace": "Consumer", "D2C": "Consumer",
+        # AI-native
+        "ai": "AI-native", "AI": "AI-native", "AI native": "AI-native", "GenAI": "AI-native",
+        "machine learning": "AI-native",
+    }
+    normalized = raw.replace(mapping)
+
+    def infer(v: str) -> str:
+        s = v.lower()
+        if "fintech" in s or "payment" in s or "bank" in s: return "Fintech"
+        if "saas" in s or "software" in s or "b2b" in s: return "B2B SaaS"
+        if any(k in s for k in ["climate","green","clean","energy","renew"]): return "Climate"
+        if any(k in s for k in ["deep","semicon","robot","space","quantum"]): return "Deeptech"
+        if any(k in s for k in ["health","med","bio"]): return "Healthtech"
+        if any(k in s for k in ["consumer","ecom","marketplace"]): return "Consumer"
+        if any(k in s for k in ["ai","genai","ml","artificial intelligence"]): return "AI-native"
+        return v
+
+    normalized = normalized.apply(infer)
+    allowed = {"Fintech","B2B SaaS","Climate","Deeptech","Healthtech","Consumer","AI-native"}
+    df[col] = normalized.where(normalized.isin(allowed), normalized)
+    return df
+# -------------------------------------------------------------------------------
 
 @st.cache_data
-def load_csv(path: str) -> pd.DataFrame:
-    try:
-        df = pd.read_csv(path)
-        return df
-    except Exception as e:
-        st.error(f"Error loading {path}: {e}")
-        return pd.DataFrame()
+def load_data():
+    # Crowdfunding (sample for now)
+    cf = pd.read_csv(DATA_DIR / 'crowdfunding_sample.csv', parse_dates=['round_date'])
+    cf = _normalize_sector_names(cf)
 
+    # Prefer live public comps if present; fall back to sample
+    public_primary = DATA_DIR / 'public_comps.csv'
+    public_fallback = DATA_DIR / 'public_comps_sample.csv'
+    if public_primary.exists():
+        pc = pd.read_csv(public_primary)
+        source = "public_comps.csv (live)"
+    else:
+        pc = pd.read_csv(public_fallback)
+        source = "public_comps_sample.csv (sample)"
+    pc = _normalize_sector_names(pc)
 
-def sector_public_median_by_consistent_method(pc: pd.DataFrame, min_n=1) -> pd.DataFrame:
+    return cf, pc, source
+
+# --- Consistent method per sector ---------------------------------------------
+def sector_public_median_by_consistent_method(pc: pd.DataFrame, min_n: int = 3) -> pd.DataFrame:
     """
-    Aggregate median EV/Revenue per sector using consistent method.
+    For each sector, choose ONE method (EV/TotalRevenue or MktCap/TTMRevenue)
+    based on availability (>= min_n comps). Return median + method used + n.
     """
-    if "ev_rev" not in pc.columns:
-        return pd.DataFrame(columns=["sector", "public_median_ev_rev"])
+    df = pc.copy()
+    if "ev_to_revenue" not in df.columns:
+        return pd.DataFrame(columns=["sector","public_median_ev_rev","public_method_used","public_n_used"])
 
-    out = (
-        pc.groupby("sector", as_index=False)
-        .agg(public_median_ev_rev=("ev_rev", "median"), n_comps=("ev_rev", "count"))
-        .query("n_comps >= @min_n")
+    df["ev_to_revenue"] = pd.to_numeric(df["ev_to_revenue"], errors="coerce")
+    counts = (
+        df.dropna(subset=["ev_to_revenue", "ev_rev_method"])
+          .groupby(["sector", "ev_rev_method"])["ticker"]
+          .count()
+          .reset_index(name="n")
     )
-    return out
 
+    rows = []
+    for sector in sorted(df["sector"].dropna().unique()):
+        method_used = None
+        n_used = 0
+        # Prefer EV/TotalRevenue if enough coverage, else MktCap/TTMRevenue
+        c1 = counts[(counts["sector"] == sector) & (counts["ev_rev_method"] == "EV/TotalRevenue")]
+        if not c1.empty and int(c1["n"].iloc[0]) >= min_n:
+            method_used = "EV/TotalRevenue"; n_used = int(c1["n"].iloc[0])
+        else:
+            c2 = counts[(counts["sector"] == sector) & (counts["ev_rev_method"] == "MktCap/TTMRevenue")]
+            if not c2.empty and int(c2["n"].iloc[0]) >= min_n:
+                method_used = "MktCap/TTMRevenue"; n_used = int(c2["n"].iloc[0])
+
+        if method_used is not None:
+            med = (
+                df[(df["sector"] == sector) & (df["ev_rev_method"] == method_used)]
+                  .dropna(subset=["ev_to_revenue"])["ev_to_revenue"]
+                  .median()
+            )
+            rows.append({"sector": sector, "public_median_ev_rev": med,
+                         "public_method_used": method_used, "public_n_used": n_used})
+        else:
+            rows.append({"sector": sector, "public_median_ev_rev": None,
+                         "public_method_used": "insufficient", "public_n_used": 0})
+    return pd.DataFrame(rows)
+# -------------------------------------------------------------------------------
 
 def sector_summary(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
     cf_sect = (
@@ -45,131 +135,172 @@ def sector_summary(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
               'revenue_last_fy_eur':'cf_median_revenue'
           })
     )
-    # Use consistent method per sector, but allow min_n=1 for MVP coverage
-    pc_med = sector_public_median_by_consistent_method(pc, min_n=1)
+    pc_med = sector_public_median_by_consistent_method(pc, min_n=3)
     return cf_sect.merge(pc_med, on='sector', how='left')
 
-
 def compute_vgi(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute sector-level VGI = (CF EV/Rev) / (Public EV/Rev)."""
     out = df.copy()
-    out["cf_ev_rev"] = pd.to_numeric(out.get("cf_median_pre_money"), errors="coerce") / pd.to_numeric(
-        out.get("cf_median_revenue"), errors="coerce"
-    )
-    out["VGI"] = out["cf_ev_rev"] / pd.to_numeric(out.get("public_median_ev_rev"), errors="coerce")
-    out.replace([float("inf"), -float("inf")], pd.NA, inplace=True)
+    out['cf_ev_rev'] = out['cf_median_pre_money'] / out['cf_median_revenue']
+    out['VGI'] = out['cf_ev_rev'] / out['public_median_ev_rev']
     return out
 
-
+# --- Top 5 / Bottom 5 helpers (robust) ----------------------------------------
 def compute_startup_vgi(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
     """Compute VGI for each startup (CF EV/Rev ÷ public median EV/Rev), safely."""
     per = cf.copy()
-
-    # Normalize startup column name
     if "startup" not in per.columns and "startup_name" in per.columns:
         per = per.rename(columns={"startup_name": "startup"})
-
-    # Ensure numeric types
     for c in ["valuation_pre_money_eur", "revenue_last_fy_eur"]:
         if c in per.columns:
             per[c] = pd.to_numeric(per[c], errors="coerce")
-
-    # Avoid division by zero / negatives
     if "revenue_last_fy_eur" in per.columns:
         per.loc[per["revenue_last_fy_eur"] <= 0, "revenue_last_fy_eur"] = pd.NA
-
-    # CF proxy EV/Rev per startup
     per["startup_ev_rev"] = per.get("valuation_pre_money_eur") / per.get("revenue_last_fy_eur")
 
-    # Use the SAME consistent public medians per sector (MVP: min_n=1)
-    pub = sector_public_median_by_consistent_method(pc, min_n=1)
-
-    out = per.merge(pub[["sector", "public_median_ev_rev"]], on="sector", how="left")
+    # Use the SAME consistent public medians per sector as the headline charts
+    pub = sector_public_median_by_consistent_method(pc, min_n=3)
+    out = per.merge(pub[["sector","public_median_ev_rev"]], on="sector", how="left")
     out["VGI"] = out["startup_ev_rev"] / out["public_median_ev_rev"]
     out.replace([float("inf"), -float("inf")], pd.NA, inplace=True)
     return out
 
-
-# -------------------------------------------------------------------
-# Streamlit UI
-# -------------------------------------------------------------------
+def top_bottom_by_sector(per_startup: pd.DataFrame, sector: str, n: int = 5):
+    """Return top/bottom n startups by VGI for a given sector (handles missing cols)."""
+    df = per_startup[per_startup["sector"] == sector].dropna(subset=["VGI"]).copy()
+    if df.empty:
+        return df, df
+    if "startup" not in df.columns and "startup_name" in df.columns:
+        df = df.rename(columns={"startup_name": "startup"})
+    # Desired order: sector → startup → country → valuation → revenue → CF EV/Rev → Public EV/Rev → VGI → platform → round_date
+    desired = [
+        "sector", "startup", "country",
+        "valuation_pre_money_eur", "revenue_last_fy_eur",
+        "startup_ev_rev", "public_median_ev_rev", "VGI",
+        "platform", "round_date"
+    ]
+    present = [c for c in desired if c in df.columns]
+    df = df[present].sort_values("VGI", ascending=False)
+    topn = df.head(min(n, len(df)))
+    bottomn = df.tail(min(n, len(df))).sort_values("VGI", ascending=True)
+    return topn, bottomn
+# -------------------------------------------------------------------------------
 
 def main():
-    st.title("Startup Value Monitor — VGI (MVP)")
-    st.caption("Comparing crowdfunding valuations with public-market multiples.")
+    st.set_page_config(page_title='Startup Value Monitor', layout='wide')
+    st.title('Startup Value Monitor — VGI (MVP)')
+    st.caption('Comparing crowdfunding valuations with public-market multiples.')
 
-    cf = load_csv("data/crowdfunding_sample.csv")
-    pc = load_csv("data/public_comps.csv")
+    cf, pc, source = load_data()
+    st.caption(f"Public comps source: {source}")
 
-    st.write("Public comps source:", f"**{len(pc)} rows** loaded from `public_comps.csv`")
-
+    # ----- Sector-level VGI charts -----
     df = compute_vgi(sector_summary(cf, pc))
+
+    c1, c2 = st.columns([2, 1], vertical_alignment="center")
+    with c1:
+        st.subheader('Valuation Gap Index (by sector)')
+        bar = alt.Chart(df.dropna(subset=['VGI'])).mark_bar().encode(
+            x=alt.X('sector', sort='-y', title='Sector'),
+            y=alt.Y('VGI', title='VGI = CF EV/Rev ÷ Public EV/Rev'),
+            tooltip=['sector',
+                     alt.Tooltip('VGI', format='.2f'),
+                     alt.Tooltip('cf_ev_rev', title='CF EV/Rev', format='.2f'),
+                     alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f'),
+                     'public_method_used','public_n_used']
+        )
+        st.altair_chart(bar, use_container_width=True)
+    with c2:
+        st.metric('Median VGI (all sectors)', f"{df['VGI'].median(skipna=True):.2f}")
+
+    with st.expander("Public comparables: method used per sector"):
+        st.dataframe(
+            df[["sector", "public_median_ev_rev", "public_method_used", "public_n_used"]]
+              .sort_values("sector")
+              .assign(public_median_ev_rev=lambda d: d["public_median_ev_rev"].round(2))
+        )
+
+    st.markdown('---')
+    st.subheader('Crowdfunding Pre-Money vs Public EV/Revenue (by sector)')
+    scatter = alt.Chart(df.dropna(subset=['public_median_ev_rev', 'cf_median_pre_money'])).mark_circle(size=140).encode(
+        x=alt.X('public_median_ev_rev', title='Public EV/Revenue (median)'),
+        y=alt.Y('cf_median_pre_money', title='Crowdfunding Pre-Money (median, €)'),
+        tooltip=['sector',
+                 alt.Tooltip('cf_median_pre_money', format=','),
+                 alt.Tooltip('public_median_ev_rev', format='.2f'),
+                 alt.Tooltip('cf_total_raised', title='CF Total Raised', format=','),
+                 'public_method_used','public_n_used']
+    )
+    st.altair_chart(scatter, use_container_width=True)
+
+    # ----- Top 5 / Bottom 5 (by sector, VGI) -----
+    st.markdown('---')
+    st.subheader("Top 5 / Bottom 5 (by sector, VGI)")
+
     per_startup = compute_startup_vgi(cf, pc)
     sectors = sorted(per_startup["sector"].dropna().unique().tolist())
     st.caption(f"Startups with valid VGI: {per_startup['VGI'].notna().sum()}")
 
-    # --- Diagnostics: why only 1 row shows per sector -------------------------
-    with st.expander("Diagnostics: VGI availability by sector"):
-        diag = per_startup.copy()
+    if not sectors:
+        st.info("No sectors available yet. Add crowdfunding rows and public comps, then rerun.")
+    else:
+        view_type = st.radio("View as:", ["Tables", "Charts"], horizontal=True)
+        chosen = st.selectbox("Pick a sector", options=sectors, index=0)
 
-        # Reasons for missing VGI
-        reasons = pd.Series(index=diag.index, dtype="object")
-        if "revenue_last_fy_eur" in diag.columns:
-            reasons[diag["revenue_last_fy_eur"].isna() | (diag["revenue_last_fy_eur"] <= 0)] = "no/zero revenue"
-        if "public_median_ev_rev" in diag.columns:
-            mask = diag["public_median_ev_rev"].isna()
-            reasons[mask] = (reasons[mask].fillna("") + "; no public median").str.strip("; ").replace("", "no public median")
-        if "startup_ev_rev" in diag.columns:
-            mask = diag["startup_ev_rev"].isna()
-            reasons[mask] = (reasons[mask].fillna("") + "; CF EV/Rev NaN").str.strip("; ")
-        mask = diag["VGI"].isna()
-        reasons[mask] = (reasons[mask].fillna("") + "; VGI NaN").str.strip("; ")
+        top5, bottom5 = top_bottom_by_sector(per_startup, chosen, n=5)
 
-        # Per-sector counts
-        summary = (diag.assign(valid=diag["VGI"].notna())
-                      .groupby("sector", as_index=False)
-                      .agg(valid_rows=("valid","sum"),
-                           total_rows=("startup","count")))
-        st.write("Per-sector counts (valid VGI vs total CF rows):")
-        st.dataframe(summary.sort_values(["valid_rows","total_rows"], ascending=[False, False]))
+        if top5.empty and bottom5.empty:
+            st.info("Not enough data in this sector yet. Add more crowdfunding rows with non-zero revenue.")
+        else:
+            if view_type == "Tables":
+                c1, c2 = st.columns(2)
+                if not top5.empty:
+                    with c1:
+                        st.markdown(f"**Top 5 — {chosen}**")
+                        st.dataframe(top5.assign(
+                            VGI=lambda d: d["VGI"].round(2),
+                            startup_ev_rev=lambda d: d["startup_ev_rev"].round(2),
+                            public_median_ev_rev=lambda d: d["public_median_ev_rev"].round(2)
+                        ))
+                if not bottom5.empty:
+                    with c2:
+                        st.markdown(f"**Bottom 5 — {chosen}**")
+                        st.dataframe(bottom5.assign(
+                            VGI=lambda d: d["VGI"].round(2),
+                            startup_ev_rev=lambda d: d["startup_ev_rev"].round(2),
+                            public_median_ev_rev=lambda d: d["public_median_ev_rev"].round(2)
+                        ))
+            else:
+                c1, c2 = st.columns(2)
+                if not top5.empty:
+                    with c1:
+                        st.markdown(f"**Top 5 — {chosen}**")
+                        chart = alt.Chart(top5.reset_index(drop=True)).mark_bar().encode(
+                            x=alt.X('VGI:Q', title='VGI'),
+                            y=alt.Y('startup:N', sort='-x', title='Startup'),
+                            tooltip=['startup', alt.Tooltip('VGI', format='.2f'),
+                                     alt.Tooltip('startup_ev_rev', title='CF EV/Rev', format='.2f'),
+                                     alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f'),
+                                     'platform','round_date']
+                        )
+                        st.altair_chart(chart, use_container_width=True)
+                if not bottom5.empty:
+                    with c2:
+                        st.markdown(f"**Bottom 5 — {chosen}**")
+                        chart = alt.Chart(bottom5.reset_index(drop=True)).mark_bar().encode(
+                            x=alt.X('VGI:Q', title='VGI'),
+                            y=alt.Y('startup:N', sort='x', title='Startup'),
+                            tooltip=['startup', alt.Tooltip('VGI', format='.2f'),
+                                     alt.Tooltip('startup_ev_rev', title='CF EV/Rev', format='.2f'),
+                                     alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f'),
+                                     'platform','round_date']
+                        )
+                        st.altair_chart(chart, use_container_width=True)
 
-        # Sample problematic rows
-        bad = diag[diag["VGI"].isna()].copy()
-        bad["missing_reason"] = reasons[bad.index]
-        cols = [c for c in ["sector","startup","revenue_last_fy_eur",
-                            "startup_ev_rev","public_median_ev_rev","VGI","missing_reason"]
-                if c in bad.columns]
-        st.write("Sample rows with missing VGI:")
-        st.dataframe(bad[cols].head(20))
-    # --------------------------------------------------------------------------
+    st.markdown('---')
+    st.write("**Notes**")
+    st.write("- Public comps median uses a single consistent method per sector (shown above).")
+    st.write("- Replace sample crowdfunding CSVs with real data next.")
+    st.write("- In production, compute EV/Revenue per round and aggregate by sector/country.")
 
-    st.subheader("Valuation Gap Index (by sector)")
-    chart = alt.Chart(df).mark_bar().encode(
-        x=alt.X("sector:N", sort="-y", title="Sector"),
-        y=alt.Y("VGI:Q", title="VGI = CF EV/Rev ÷ Public EV/Rev"),
-        tooltip=["sector", "cf_ev_rev", "public_median_ev_rev", "VGI"]
-    ).properties(height=400)
-    st.altair_chart(chart, use_container_width=True)
-
-    median_vgi = df["VGI"].median(skipna=True)
-    st.metric(label="Median VGI (all sectors)", value=f"{median_vgi:.2f}" if pd.notna(median_vgi) else "n/a")
-
-    st.subheader("Crowdfunding Pre-Money vs Public EV/Revenue (by sector)")
-    scatter = alt.Chart(df).mark_point(size=120).encode(
-        x=alt.X("public_median_ev_rev", title="Public EV/Revenue (median)"),
-        y=alt.Y("cf_median_pre_money", title="Crowdfunding Pre-Money (median, €)"),
-        color="sector",
-        tooltip=["sector", "cf_median_pre_money", "cf_median_revenue", "public_median_ev_rev", "VGI"]
-    ).properties(height=400)
-    st.altair_chart(scatter, use_container_width=True)
-
-    st.caption("Notes:")
-    st.markdown(
-        "- Uses sample CSVs in `data/`. Replace with real scrapes/APIs.\n"
-        "- VGI here is a proxy for demo; production should compute EV/Revenue per round, then aggregate.\n"
-        "- All values normalized to EUR in the pipeline (coming next)."
-    )
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
