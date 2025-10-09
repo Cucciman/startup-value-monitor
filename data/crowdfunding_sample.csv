@@ -1,4 +1,4 @@
-platform,round_date,startup_name,country,sector,valuation_pre_money_eur,amount_raised_eur,revenue_last_fy_eur
+platform,round_date,startup_name,country,sector,valuation_pre_money_eur,amount_raised_eur,revenue_last_fy_eur,arr_eur,mrr_eur,gmv_eur,assumed_take_rate_pct,headcount
 Crowdcube,2025-09-10,PayWave,United Kingdom,Fintech,20000000,3500000,2500000
 Seedrs,2025-08-22,GreenVolt,France,Climate Tech,15000000,2200000,1200000
 Seedrs,2025-09-30,SkyDocs,United Kingdom,SaaS,12000000,1800000,1500000
