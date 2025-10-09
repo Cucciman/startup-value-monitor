@@ -135,7 +135,7 @@ def sector_summary(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
               'revenue_last_fy_eur':'cf_median_revenue'
           })
     )
-    pc_med = sector_public_median_by_consistent_method(pc, min_n=3)
+    pc_med = sector_public_median_by_consistent_method(pc, min_n=1)
     return cf_sect.merge(pc_med, on='sector', how='left')
 
 def compute_vgi(df: pd.DataFrame) -> pd.DataFrame:
@@ -158,7 +158,7 @@ def compute_startup_vgi(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
     per["startup_ev_rev"] = per.get("valuation_pre_money_eur") / per.get("revenue_last_fy_eur")
 
     # Use the SAME consistent public medians per sector as the headline charts
-    pub = sector_public_median_by_consistent_method(pc, min_n=3)
+    pub = sector_public_median_by_consistent_method(pc, min_n=1)
     out = per.merge(pub[["sector","public_median_ev_rev"]], on="sector", how="left")
     out["VGI"] = out["startup_ev_rev"] / out["public_median_ev_rev"]
     out.replace([float("inf"), -float("inf")], pd.NA, inplace=True)
