@@ -14,14 +14,12 @@ def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFra
     if col not in df.columns:
         return df
 
-    # Clean up whitespace and casing
     raw = (
         df[col].astype(str)
         .str.strip()
         .str.replace(r"\s+", " ", regex=True)
     )
 
-    # Direct mapping for known variations
     mapping = {
         # SaaS
         "saas": "B2B SaaS", "SaaS": "B2B SaaS", "SaAS": "B2B SaaS", "B2B SaaS": "B2B SaaS",
@@ -52,10 +50,8 @@ def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFra
         "machine learning": "AI-native",
     }
 
-    # Apply the direct replacements
     normalized = raw.replace(mapping)
 
-    # Fallbacks for messy labels using keyword inference
     def infer(v: str) -> str:
         s = v.lower()
         if "fintech" in s or "payment" in s or "bank" in s:
@@ -72,7 +68,7 @@ def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFra
             return "Consumer"
         if any(k in s for k in ["ai", "genai", "ml", "artificial intelligence"]):
             return "AI-native"
-        return v  # leave unchanged if uncertain
+        return v
 
     normalized = normalized.apply(infer)
 
@@ -126,6 +122,36 @@ def compute_vgi(df: pd.DataFrame) -> pd.DataFrame:
     out['VGI'] = out['cf_ev_rev'] / out['public_median_ev_rev']
     return out
 
+# --- Leader / Laggard helpers --------------------------------------------------
+def compute_startup_vgi(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
+    """Compute VGI for each startup (CF EV/Rev ÷ public median EV/Rev)."""
+    pub = (
+        pc.groupby("sector", as_index=False)["ev_to_revenue"]
+        .median()
+        .rename(columns={"ev_to_revenue": "public_median_ev_rev"})
+    )
+    per = cf.copy()
+    per["startup_ev_rev"] = per["valuation_pre_money_eur"] / per["revenue_last_fy_eur"]
+    out = per.merge(pub, on="sector", how="left")
+    out["VGI"] = out["startup_ev_rev"] / out["public_median_ev_rev"]
+    return out
+
+def top_bottom_by_sector(per_startup: pd.DataFrame, sector: str, n: int = 5):
+    """Return top/bottom n startups by VGI for a given sector."""
+    df = per_startup[per_startup["sector"] == sector].dropna(subset=["VGI"]).copy()
+    if df.empty:
+        return df, df
+    cols = [
+        "platform", "round_date", "startup", "country", "sector",
+        "valuation_pre_money_eur", "revenue_last_fy_eur",
+        "startup_ev_rev", "public_median_ev_rev", "VGI"
+    ]
+    df = df[cols].sort_values("VGI", ascending=False)
+    topn = df.head(n)
+    bottomn = df.tail(n).sort_values("VGI", ascending=True)
+    return topn, bottomn
+# -------------------------------------------------------------------------------
+
 def main():
     st.set_page_config(page_title='Startup Value Monitor', layout='wide')
     st.title('Startup Value Monitor — VGI (MVP)')
@@ -134,6 +160,7 @@ def main():
     cf, pc, source = load_data()
     st.caption(f"Public comps source: {source}")
 
+    # ----- Sector-level VGI charts -----
     df = compute_vgi(sector_summary(cf, pc))
 
     c1, c2 = st.columns([2, 1], vertical_alignment="center")
@@ -163,101 +190,66 @@ def main():
     )
     st.altair_chart(scatter, use_container_width=True)
 
+    # ----- Leaders & Laggards (by sector, VGI) -----
+    st.markdown('---')
+    st.subheader("Leaders & Laggards (by sector, VGI)")
+
+    per_startup = compute_startup_vgi(cf, pc)
+    sectors = sorted(per_startup["sector"].dropna().unique().tolist())
+
+    view_type = st.radio("View as:", ["Tables", "Charts"], horizontal=True)
+    chosen = st.selectbox("Pick a sector", options=sectors, index=0 if sectors else None)
+
+    if chosen:
+        top5, bottom5 = top_bottom_by_sector(per_startup, chosen, n=5)
+        if view_type == "Tables":
+            c1, c2 = st.columns(2)
+            if not top5.empty:
+                with c1:
+                    st.markdown(f"**Top 5 — {chosen}**")
+                    st.dataframe(top5.assign(
+                        VGI=lambda d: d["VGI"].round(2),
+                        startup_ev_rev=lambda d: d["startup_ev_rev"].round(2),
+                        public_median_ev_rev=lambda d: d["public_median_ev_rev"].round(2)
+                    ))
+            if not bottom5.empty:
+                with c2:
+                    st.markdown(f"**Bottom 5 — {chosen}**")
+                    st.dataframe(bottom5.assign(
+                        VGI=lambda d: d["VGI"].round(2),
+                        startup_ev_rev=lambda d: d["startup_ev_rev"].round(2),
+                        public_median_ev_rev=lambda d: d["public_median_ev_rev"].round(2)
+                    ))
+        else:
+            c1, c2 = st.columns(2)
+            if not top5.empty:
+                with c1:
+                    st.markdown(f"**Top 5 — {chosen}**")
+                    chart = alt.Chart(top5.reset_index(drop=True)).mark_bar().encode(
+                        x=alt.X('VGI:Q', title='VGI'),
+                        y=alt.Y('startup:N', sort='-x', title='Startup'),
+                        tooltip=['startup', alt.Tooltip('VGI', format='.2f'),
+                                 alt.Tooltip('startup_ev_rev', title='CF EV/Rev', format='.2f'),
+                                 alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f')]
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+            if not bottom5.empty:
+                with c2:
+                    st.markdown(f"**Bottom 5 — {chosen}**")
+                    chart = alt.Chart(bottom5.reset_index(drop=True)).mark_bar().encode(
+                        x=alt.X('VGI:Q', title='VGI'),
+                        y=alt.Y('startup:N', sort='x', title='Startup'),
+                        tooltip=['startup', alt.Tooltip('VGI', format='.2f'),
+                                 alt.Tooltip('startup_ev_rev', title='CF EV/Rev', format='.2f'),
+                                 alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f')]
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+
     st.markdown('---')
     st.write("**Notes**")
     st.write("- Public comps now read from `data/public_comps.csv` when available (yfinance).")
     st.write("- This demo uses sample crowdfunding CSVs; we’ll replace them with real data next.")
     st.write("- In production, compute EV/Revenue per round and aggregate by sector/country.")
 
-# --- Leader / Laggard helpers --------------------------------------------------
-def compute_startup_vgi(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
-    """Compute VGI for each startup (CF EV/Rev ÷ public median EV/Rev)."""
-    pub = (
-        pc.groupby("sector", as_index=False)["ev_to_revenue"]
-        .median()
-        .rename(columns={"ev_to_revenue": "public_median_ev_rev"})
-    )
-    per = cf.copy()
-    per["startup_ev_rev"] = per["valuation_pre_money_eur"] / per["revenue_last_fy_eur"]
-    out = per.merge(pub, on="sector", how="left")
-    out["VGI"] = out["startup_ev_rev"] / out["public_median_ev_rev"]
-    return out
-
-
-def top_bottom_by_sector(per_startup: pd.DataFrame, sector: str, n: int = 5):
-    """Return top/bottom n startups by VGI for a given sector."""
-    df = per_startup[per_startup["sector"] == sector].dropna(subset=["VGI"]).copy()
-    if df.empty:
-        return df, df
-    cols = [
-        "platform", "round_date", "startup_name", "country", "sector",
-        "valuation_pre_money_eur", "revenue_last_fy_eur",
-        "startup_ev_rev", "public_median_ev_rev", "VGI"
-    ]
-    df = df[cols].sort_values("VGI", ascending=False)
-    topn = df.head(n)
-    bottomn = df.tail(n).sort_values("VGI", ascending=True)
-    return topn, bottomn
-
-
-# --- Leader / Laggard UI block -------------------------------------------------
-st.markdown('---')
-st.subheader("Leaders & Laggards (by sector, VGI)")
-
-per_startup = compute_startup_vgi(cf, pc)
-sectors = sorted(per_startup["sector"].dropna().unique().tolist())
-
-view_type = st.radio("View as:", ["Tables", "Charts"], horizontal=True)
-chosen = st.selectbox("Pick a sector", options=sectors, index=0 if sectors else None)
-
-if chosen:
-    top5, bottom5 = top_bottom_by_sector(per_startup, chosen, n=5)
-    if view_type == "Tables":
-        c1, c2 = st.columns(2)
-        if not top5.empty:
-            with c1:
-                st.markdown(f"**Top 5 — {chosen}**")
-                st.dataframe(top5.assign(
-                    VGI=lambda d: d["VGI"].round(2),
-                    startup_ev_rev=lambda d: d["startup_ev_rev"].round(2),
-                    public_median_ev_rev=lambda d: d["public_median_ev_rev"].round(2)
-                ))
-        if not bottom5.empty:
-            with c2:
-                st.markdown(f"**Bottom 5 — {chosen}**")
-                st.dataframe(bottom5.assign(
-                    VGI=lambda d: d["VGI"].round(2),
-                    startup_ev_rev=lambda d: d["startup_ev_rev"].round(2),
-                    public_median_ev_rev=lambda d: d["public_median_ev_rev"].round(2)
-                ))
-    else:
-        c1, c2 = st.columns(2)
-        if not top5.empty:
-            with c1:
-                st.markdown(f"**Top 5 — {chosen}**")
-                chart = alt.Chart(top5.reset_index(drop=True)).mark_bar().encode(
-                    x=alt.X('VGI:Q', title='VGI'),
-                    y=alt.Y('startup_name:N', sort='-x', title='Startup'),
-                    tooltip=['startup_name', alt.Tooltip('VGI', format='.2f'),
-                             alt.Tooltip('startup_ev_rev', title='CF EV/Rev', format='.2f'),
-                             alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f')]
-                )
-                st.altair_chart(chart, use_container_width=True)
-        if not bottom5.empty:
-            with c2:
-                st.markdown(f"**Bottom 5 — {chosen}**")
-                chart = alt.Chart(bottom5.reset_index(drop=True)).mark_bar().encode(
-                    x=alt.X('VGI:Q', title='VGI'),
-                    y=alt.Y('startup_name:N', sort='x', title='Startup'),
-                    tooltip=['startup_name', alt.Tooltip('VGI', format='.2f'),
-                             alt.Tooltip('startup_ev_rev', title='CF EV/Rev', format='.2f'),
-                             alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f')]
-                )
-                st.altair_chart(chart, use_container_width=True)
-
-    if top5.empty and bottom5.empty:
-        st.info("Not enough data in this sector yet. Add more crowdfunding rows to see rankings.")
-
 if __name__ == '__main__':
-    main()
-
+    main()-
