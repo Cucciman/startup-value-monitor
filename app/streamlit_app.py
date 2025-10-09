@@ -172,8 +172,6 @@ def estimate_revenue(cf: pd.DataFrame) -> pd.DataFrame:
     assumed_take_rate_pct, headcount.
     """
     df = cf.copy()
-
-    # Initialize placeholder Series with nullable types
     est = pd.Series(pd.NA, index=df.index, dtype="Float64")  # nullable float
     src = pd.Series(pd.NA, index=df.index, dtype="string")   # pandas string dtype
     conf = pd.Series(pd.NA, index=df.index, dtype="string")  # pandas string dtype
