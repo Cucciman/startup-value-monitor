@@ -190,9 +190,73 @@ def main():
     )
     st.altair_chart(scatter, use_container_width=True)
 
-    # ----- Leaders & Laggards (by sector, VGI) -----
+# --- Top 5 / Bottom 5 helpers (robust to column mismatches) --------------------
+def compute_startup_vgi(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
+    """Compute VGI for each startup (CF EV/Rev ÷ public median EV/Rev), safely."""
+    per = cf.copy()
+
+    # Normalize startup column name
+    if "startup" not in per.columns and "startup_name" in per.columns:
+        per = per.rename(columns={"startup_name": "startup"})
+
+    # Ensure numeric types
+    for c in ["valuation_pre_money_eur", "revenue_last_fy_eur"]:
+        if c in per.columns:
+            per[c] = pd.to_numeric(per[c], errors="coerce")
+
+    # Avoid division by zero / negatives
+    if "revenue_last_fy_eur" in per.columns:
+        per.loc[per["revenue_last_fy_eur"] <= 0, "revenue_last_fy_eur"] = pd.NA
+
+    # Compute startup EV/Rev proxy
+    per["startup_ev_rev"] = per.get("valuation_pre_money_eur") / per.get("revenue_last_fy_eur")
+
+    # Public medians by sector
+    pub = pc.copy()
+    if "ev_to_revenue" in pub.columns:
+        pub["ev_to_revenue"] = pd.to_numeric(pub["ev_to_revenue"], errors="coerce")
+    pub = (
+        pub.groupby("sector", as_index=False)["ev_to_revenue"]
+           .median()
+           .rename(columns={"ev_to_revenue": "public_median_ev_rev"})
+    )
+
+    out = per.merge(pub, on="sector", how="left")
+
+    # Compute VGI and clean infs
+    out["VGI"] = out["startup_ev_rev"] / out["public_median_ev_rev"]
+    out.replace([float("inf"), -float("inf")], pd.NA, inplace=True)
+
+    return out
+
+
+def top_bottom_by_sector(per_startup: pd.DataFrame, sector: str, n: int = 5):
+    """Return top/bottom n startups by VGI for a given sector (handles missing cols)."""
+    df = per_startup[per_startup["sector"] == sector].dropna(subset=["VGI"]).copy()
+    if df.empty:
+        return df, df
+
+    # Ensure we have a 'startup' column
+    if "startup" not in df.columns and "startup_name" in df.columns:
+        df = df.rename(columns={"startup_name": "startup"})
+
+    # Columns we *want* to show (only keep what's present)
+    desired = [
+        "platform", "round_date", "startup", "country", "sector",
+        "valuation_pre_money_eur", "revenue_last_fy_eur",
+        "startup_ev_rev", "public_median_ev_rev", "VGI"
+    ]
+    present = [c for c in desired if c in df.columns]
+    df = df[present].sort_values("VGI", ascending=False)
+
+    topn = df.head(n)
+    bottomn = df.tail(n).sort_values("VGI", ascending=True)
+    return topn, bottomn
+# -------------------------------------------------------------------------------
+
+# --- UI block inside main() ----------------------------------------------------
     st.markdown('---')
-    st.subheader("Leaders & Laggards (by sector, VGI)")
+    st.subheader("Top 5 / Bottom 5 (by sector, VGI)")
 
     per_startup = compute_startup_vgi(cf, pc)
     sectors = sorted(per_startup["sector"].dropna().unique().tolist())
@@ -244,6 +308,7 @@ def main():
                                  alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f')]
                     )
                     st.altair_chart(chart, use_container_width=True)
+# -------------------------------------------------------------------------------
 
     st.markdown('---')
     st.write("**Notes**")
