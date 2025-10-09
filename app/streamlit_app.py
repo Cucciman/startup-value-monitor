@@ -378,45 +378,45 @@ def main():
 
         if used.empty:
             st.info("No startups with a valid VGI in this sector yet (need non-zero revenue and a public median).")
-else:
-    # Format numbers and rename columns for readability
-    formatted = (
-        used[cols]
-        .sort_values("VGI", ascending=False)
-        .assign(
-            VGI=lambda d: pd.to_numeric(d["VGI"], errors="coerce").round(2),
-            startup_ev_rev=lambda d: pd.to_numeric(d["startup_ev_rev"], errors="coerce").round(2),
-            public_median_ev_rev=lambda d: pd.to_numeric(d["public_median_ev_rev"], errors="coerce").round(2),
-            valuation_pre_money_eur=lambda d: pd.to_numeric(d["valuation_pre_money_eur"], errors="coerce").round(0),
-            revenue_last_fy_eur=lambda d: pd.to_numeric(d.get("revenue_last_fy_eur"), errors="coerce").round(0),
-            estimated_revenue_eur=lambda d: pd.to_numeric(d.get("estimated_revenue_eur"), errors="coerce").round(0),
-        )
-        .rename(columns={
-            "startup": "Startup",
-            "country": "Country",
-            "sector": "Sector",
-            "valuation_pre_money_eur": "Pre-Money (€)",
-            "revenue_last_fy_eur": "Revenue (Last FY, €)",
-            "estimated_revenue_eur": "Revenue (Estimated, €)",
-            "startup_ev_rev": "CF EV/Rev",
-            "public_median_ev_rev": "Public EV/Rev (median)",
-            "VGI": "VGI (×)",
-            "platform": "Platform",
-            "round_date": "Round date",
-            "rev_source": "Revenue source",
-            "confidence": "Confidence",
-        })
-    )
+        else:
+            # Format numbers and rename columns for readability
+            formatted = (
+                used[cols]
+                .sort_values("VGI", ascending=False)
+                .assign(
+                    VGI=lambda d: pd.to_numeric(d["VGI"], errors="coerce").round(2),
+                    startup_ev_rev=lambda d: pd.to_numeric(d["startup_ev_rev"], errors="coerce").round(2),
+                    public_median_ev_rev=lambda d: pd.to_numeric(d["public_median_ev_rev"], errors="coerce").round(2),
+                    valuation_pre_money_eur=lambda d: pd.to_numeric(d["valuation_pre_money_eur"], errors="coerce").round(0),
+                    revenue_last_fy_eur=lambda d: pd.to_numeric(d.get("revenue_last_fy_eur"), errors="coerce").round(0),
+                    estimated_revenue_eur=lambda d: pd.to_numeric(d.get("estimated_revenue_eur"), errors="coerce").round(0),
+                )
+                .rename(columns={
+                    "startup": "Startup",
+                    "country": "Country",
+                    "sector": "Sector",
+                    "valuation_pre_money_eur": "Pre-Money (€)",
+                    "revenue_last_fy_eur": "Revenue (Last FY, €)",
+                    "estimated_revenue_eur": "Revenue (Estimated, €)",
+                    "startup_ev_rev": "CF EV/Rev",
+                    "public_median_ev_rev": "Public EV/Rev (median)",
+                    "VGI": "VGI (×)",
+                    "platform": "Platform",
+                    "round_date": "Round date",
+                    "rev_source": "Revenue source",
+                    "confidence": "Confidence",
+                })
+            )
 
-    # Prefer estimated revenue column if present
-    display_cols = [c for c in [
-        "Sector","Startup","Country",
-        "Pre-Money (€)","Revenue (Estimated, €)","Revenue (Last FY, €)",
-        "CF EV/Rev","Public EV/Rev (median)","VGI (×)",
-        "Revenue source","Confidence","Platform","Round date"
-    ] if c in formatted.columns]
+            # Prefer estimated revenue column if present
+            display_cols = [c for c in [
+                "Sector","Startup","Country",
+                "Pre-Money (€)","Revenue (Estimated, €)","Revenue (Last FY, €)",
+                "CF EV/Rev","Public EV/Rev (median)","VGI (×)",
+                "Revenue source","Confidence","Platform","Round date"
+            ] if c in formatted.columns]
 
-    st.dataframe(formatted[display_cols], use_container_width=True)
+            st.dataframe(formatted[display_cols], use_container_width=True)           
             csv = table.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label=f"Download startups used for {chosen} (CSV)",
