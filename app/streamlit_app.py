@@ -173,6 +173,11 @@ def estimate_revenue(cf: pd.DataFrame) -> pd.DataFrame:
     """
     df = cf.copy()
 
+    # Initialize placeholder Series with nullable types
+    est = pd.Series(pd.NA, index=df.index, dtype="Float64")  # nullable float
+    src = pd.Series(pd.NA, index=df.index, dtype="string")   # pandas string dtype
+    conf = pd.Series(pd.NA, index=df.index, dtype="string")  # pandas string dtype
+
     # Ensure optional cols exist
     for c in ["arr_eur", "mrr_eur", "gmv_eur", "assumed_take_rate_pct", "headcount"]:
         if c not in df.columns:
@@ -183,10 +188,6 @@ def estimate_revenue(cf: pd.DataFrame) -> pd.DataFrame:
     for c in num_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    est = pd.Series(pd.NA, index=df.index, dtype="float")
-    src = pd.Series(pd.NA, index=df.index, dtype="string")
-    conf = pd.Series(pd.NA, index=df.index, dtype="string")
 
     # 1) Audited/last FY revenue
     mask = df["revenue_last_fy_eur"].notna() & (df["revenue_last_fy_eur"] > 0)
