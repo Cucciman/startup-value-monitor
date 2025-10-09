@@ -20,12 +20,11 @@ def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFra
     )
     mapping = {
         # SaaS
-        "saas": "B2B SaaS", "SaaS": "B2B SaaS", "SaAS": "B2B SaaS",
-        "software": "B2B SaaS", "enterprise software": "B2B SaaS",
+        "saas": "B2B SaaS", "SaaS": "B2B SaaS", "SaAS": "B2B SaaS", "software": "B2B SaaS",
+        "enterprise software": "B2B SaaS",
         # Climate
-        "climate": "Climate", "Climate Tech": "Climate",
-        "climatetech": "Climate", "greentech": "Climate", "cleantech": "Climate",
-        "energy": "Climate", "renewables": "Climate",
+        "climate": "Climate", "Climate Tech": "Climate", "climatetech": "Climate",
+        "greentech": "Climate", "cleantech": "Climate", "energy": "Climate", "renewables": "Climate",
         # Fintech
         "fintech": "Fintech", "FinTech": "Fintech", "Fin tech": "Fintech", "payments": "Fintech",
         # Deeptech
@@ -79,6 +78,51 @@ def load_data():
 
     return cf, pc, source
 
+# --- Consistent method per sector ---------------------------------------------
+def sector_public_median_by_consistent_method(pc: pd.DataFrame, min_n: int = 3) -> pd.DataFrame:
+    """
+    For each sector, choose ONE method (EV/TotalRevenue or MktCap/TTMRevenue)
+    based on availability (>= min_n comps). Return median + method used + n.
+    """
+    df = pc.copy()
+    if "ev_to_revenue" not in df.columns:
+        return pd.DataFrame(columns=["sector","public_median_ev_rev","public_method_used","public_n_used"])
+
+    df["ev_to_revenue"] = pd.to_numeric(df["ev_to_revenue"], errors="coerce")
+    counts = (
+        df.dropna(subset=["ev_to_revenue", "ev_rev_method"])
+          .groupby(["sector", "ev_rev_method"])["ticker"]
+          .count()
+          .reset_index(name="n")
+    )
+
+    rows = []
+    for sector in sorted(df["sector"].dropna().unique()):
+        method_used = None
+        n_used = 0
+        # Prefer EV/TotalRevenue if enough coverage, else MktCap/TTMRevenue
+        c1 = counts[(counts["sector"] == sector) & (counts["ev_rev_method"] == "EV/TotalRevenue")]
+        if not c1.empty and int(c1["n"].iloc[0]) >= min_n:
+            method_used = "EV/TotalRevenue"; n_used = int(c1["n"].iloc[0])
+        else:
+            c2 = counts[(counts["sector"] == sector) & (counts["ev_rev_method"] == "MktCap/TTMRevenue")]
+            if not c2.empty and int(c2["n"].iloc[0]) >= min_n:
+                method_used = "MktCap/TTMRevenue"; n_used = int(c2["n"].iloc[0])
+
+        if method_used is not None:
+            med = (
+                df[(df["sector"] == sector) & (df["ev_rev_method"] == method_used)]
+                  .dropna(subset=["ev_to_revenue"])["ev_to_revenue"]
+                  .median()
+            )
+            rows.append({"sector": sector, "public_median_ev_rev": med,
+                         "public_method_used": method_used, "public_n_used": n_used})
+        else:
+            rows.append({"sector": sector, "public_median_ev_rev": None,
+                         "public_method_used": "insufficient", "public_n_used": 0})
+    return pd.DataFrame(rows)
+# -------------------------------------------------------------------------------
+
 def sector_summary(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
     cf_sect = (
         cf.groupby('sector', as_index=False)
@@ -91,12 +135,8 @@ def sector_summary(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
               'revenue_last_fy_eur':'cf_median_revenue'
           })
     )
-    pc_sect = (
-        pc.groupby('sector', as_index=False)
-          .agg({'ev_to_revenue':'median'})
-          .rename(columns={'ev_to_revenue':'public_median_ev_rev'})
-    )
-    return cf_sect.merge(pc_sect, on='sector', how='left')
+    pc_med = sector_public_median_by_consistent_method(pc, min_n=3)
+    return cf_sect.merge(pc_med, on='sector', how='left')
 
 def compute_vgi(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -117,15 +157,9 @@ def compute_startup_vgi(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
         per.loc[per["revenue_last_fy_eur"] <= 0, "revenue_last_fy_eur"] = pd.NA
     per["startup_ev_rev"] = per.get("valuation_pre_money_eur") / per.get("revenue_last_fy_eur")
 
-    pub = pc.copy()
-    if "ev_to_revenue" in pub.columns:
-        pub["ev_to_revenue"] = pd.to_numeric(pub["ev_to_revenue"], errors="coerce")
-    pub = (
-        pub.groupby("sector", as_index=False)["ev_to_revenue"]
-           .median()
-           .rename(columns={"ev_to_revenue": "public_median_ev_rev"})
-    )
-    out = per.merge(pub, on="sector", how="left")
+    # Use the SAME consistent public medians per sector as the headline charts
+    pub = sector_public_median_by_consistent_method(pc, min_n=3)
+    out = per.merge(pub[["sector","public_median_ev_rev"]], on="sector", how="left")
     out["VGI"] = out["startup_ev_rev"] / out["public_median_ev_rev"]
     out.replace([float("inf"), -float("inf")], pd.NA, inplace=True)
     return out
@@ -137,15 +171,17 @@ def top_bottom_by_sector(per_startup: pd.DataFrame, sector: str, n: int = 5):
         return df, df
     if "startup" not in df.columns and "startup_name" in df.columns:
         df = df.rename(columns={"startup_name": "startup"})
+    # Desired order: sector → startup → country → valuation → revenue → CF EV/Rev → Public EV/Rev → VGI → platform → round_date
     desired = [
-        "platform","round_date","startup","country","sector",
-        "valuation_pre_money_eur","revenue_last_fy_eur",
-        "startup_ev_rev","public_median_ev_rev","VGI"
+        "sector", "startup", "country",
+        "valuation_pre_money_eur", "revenue_last_fy_eur",
+        "startup_ev_rev", "public_median_ev_rev", "VGI",
+        "platform", "round_date"
     ]
     present = [c for c in desired if c in df.columns]
     df = df[present].sort_values("VGI", ascending=False)
-    topn = df.head(n)
-    bottomn = df.tail(n).sort_values("VGI", ascending=True)
+    topn = df.head(min(n, len(df)))
+    bottomn = df.tail(min(n, len(df))).sort_values("VGI", ascending=True)
     return topn, bottomn
 # -------------------------------------------------------------------------------
 
@@ -169,11 +205,19 @@ def main():
             tooltip=['sector',
                      alt.Tooltip('VGI', format='.2f'),
                      alt.Tooltip('cf_ev_rev', title='CF EV/Rev', format='.2f'),
-                     alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f')]
+                     alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f'),
+                     'public_method_used','public_n_used']
         )
         st.altair_chart(bar, use_container_width=True)
     with c2:
         st.metric('Median VGI (all sectors)', f"{df['VGI'].median(skipna=True):.2f}")
+
+    with st.expander("Public comparables: method used per sector"):
+        st.dataframe(
+            df[["sector", "public_median_ev_rev", "public_method_used", "public_n_used"]]
+              .sort_values("sector")
+              .assign(public_median_ev_rev=lambda d: d["public_median_ev_rev"].round(2))
+        )
 
     st.markdown('---')
     st.subheader('Crowdfunding Pre-Money vs Public EV/Revenue (by sector)')
@@ -183,7 +227,8 @@ def main():
         tooltip=['sector',
                  alt.Tooltip('cf_median_pre_money', format=','),
                  alt.Tooltip('public_median_ev_rev', format='.2f'),
-                 alt.Tooltip('cf_total_raised', title='CF Total Raised', format=',')]
+                 alt.Tooltip('cf_total_raised', title='CF Total Raised', format=','),
+                 'public_method_used','public_n_used']
     )
     st.altair_chart(scatter, use_container_width=True)
 
@@ -193,7 +238,7 @@ def main():
 
     per_startup = compute_startup_vgi(cf, pc)
     sectors = sorted(per_startup["sector"].dropna().unique().tolist())
-    st.caption(f"Debug: startups with VGI rows = {len(per_startup.dropna(subset=['VGI']))}")
+    st.caption(f"Startups with valid VGI: {per_startup['VGI'].notna().sum()}")
 
     if not sectors:
         st.info("No sectors available yet. Add crowdfunding rows and public comps, then rerun.")
@@ -204,7 +249,7 @@ def main():
         top5, bottom5 = top_bottom_by_sector(per_startup, chosen, n=5)
 
         if top5.empty and bottom5.empty:
-            st.info("Not enough data in this sector yet. Add more crowdfunding rows with revenue to compute VGI.")
+            st.info("Not enough data in this sector yet. Add more crowdfunding rows with non-zero revenue.")
         else:
             if view_type == "Tables":
                 c1, c2 = st.columns(2)
@@ -234,7 +279,8 @@ def main():
                             y=alt.Y('startup:N', sort='-x', title='Startup'),
                             tooltip=['startup', alt.Tooltip('VGI', format='.2f'),
                                      alt.Tooltip('startup_ev_rev', title='CF EV/Rev', format='.2f'),
-                                     alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f')]
+                                     alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f'),
+                                     'platform','round_date']
                         )
                         st.altair_chart(chart, use_container_width=True)
                 if not bottom5.empty:
@@ -245,14 +291,15 @@ def main():
                             y=alt.Y('startup:N', sort='x', title='Startup'),
                             tooltip=['startup', alt.Tooltip('VGI', format='.2f'),
                                      alt.Tooltip('startup_ev_rev', title='CF EV/Rev', format='.2f'),
-                                     alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f')]
+                                     alt.Tooltip('public_median_ev_rev', title='Public EV/Rev', format='.2f'),
+                                     'platform','round_date']
                         )
                         st.altair_chart(chart, use_container_width=True)
 
     st.markdown('---')
     st.write("**Notes**")
-    st.write("- Public comps now read from `data/public_comps.csv` when available (yfinance).")
-    st.write("- This demo uses sample crowdfunding CSVs; we’ll replace them with real data next.")
+    st.write("- Public comps median uses a single consistent method per sector (shown above).")
+    st.write("- Replace sample crowdfunding CSVs with real data next.")
     st.write("- In production, compute EV/Revenue per round and aggregate by sector/country.")
 
 if __name__ == '__main__':
