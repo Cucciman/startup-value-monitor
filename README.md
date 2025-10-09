@@ -16,3 +16,21 @@ This project collects and analyzes only **publicly available** data (e.g., crowd
 - **Exclude personal data** (no emails, investor names, or other PII).
 
 The goal is transparency and reproducibility — not commercial data extraction.
+
+---
+
+## 📈 Valuation Gap Index (VGI)
+
+The **Valuation Gap Index (VGI)** measures how startup valuations on crowdfunding platforms compare to public-market benchmarks.
+
+It is defined as:
+
+\[
+\text{VGI} = \frac{\text{Median (Crowdfunding EV/Revenue)}}{\text{Median (Public EV/Revenue)}}
+\]
+
+- **VGI = 1.0** → crowdfunding valuations are in line with comparable listed companies.  
+- **VGI > 1.0** → startups are priced higher (potential overvaluation).  
+- **VGI < 1.0** → startups are priced lower (potential undervaluation).
+
+This metric provides a simple, reproducible way to compare sectors and track how market sentiment toward early-stage ventures evolves over time.
