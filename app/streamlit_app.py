@@ -158,30 +158,36 @@ def sector_public_median_by_consistent_method(pc: pd.DataFrame, min_n: int = 1) 
 # ---------------------------- Aggregations ------------------------------------
 
 def sector_summary(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
-    # Make a copy and ensure required numeric columns exist
+    """
+    Build sector-level CF medians using estimated revenue so VGI is available
+    even when audited revenue is missing.
+    """
+    # Ensure expected numeric columns exist
     cf2 = cf.copy()
-    required = ["valuation_pre_money_eur", "amount_raised_eur", "revenue_last_fy_eur"]
-    for c in required:
+    for c in ["valuation_pre_money_eur", "amount_raised_eur", "revenue_last_fy_eur"]:
         if c not in cf2.columns:
             cf2[c] = pd.NA
-
-    # Coerce to numeric
-    for c in required:
         cf2[c] = pd.to_numeric(cf2[c], errors="coerce")
 
-    # Group and compute CF medians/sums
+    # Use the same estimator we use per-startup
+    cf_est = estimate_revenue(cf2)
+    # Prefer estimated revenue for sector-level median
+    cf_est["revenue_for_sector"] = pd.to_numeric(cf_est.get("estimated_revenue_eur"), errors="coerce")
+
+    # Sector aggregates (median pre-money, sum raised, median revenue (estimated))
     cf_sect = (
-        cf2.groupby("sector", as_index=False)
-           .agg(
-               cf_median_pre_money=("valuation_pre_money_eur", "median"),
-               cf_total_raised=("amount_raised_eur", "sum"),
-               cf_median_revenue=("revenue_last_fy_eur", "median"),
-           )
+        cf_est.groupby("sector", as_index=False)
+              .agg(
+                  cf_median_pre_money=("valuation_pre_money_eur", "median"),
+                  cf_total_raised=("amount_raised_eur", "sum"),
+                  cf_median_revenue=("revenue_for_sector", "median"),
+              )
     )
 
     # Merge with public comps median (consistent method)
     pc_med = sector_public_median_by_consistent_method(pc, min_n=1)  # MVP coverage
     return cf_sect.merge(pc_med, on="sector", how="left")
+
 def compute_vgi(df: pd.DataFrame) -> pd.DataFrame:
     """Sector-level VGI = (CF EV/Rev) / (Public EV/Rev)."""
     out = df.copy()
