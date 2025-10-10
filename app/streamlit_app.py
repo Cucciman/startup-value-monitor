@@ -64,11 +64,29 @@ def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFra
 
 @st.cache_data
 def load_data():
-    # Crowdfunding (sample/mutable)
-    cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
-    cf = _normalize_sector_names(cf)
+    # Optional: live CSV URL (e.g., Google Sheets → File > Share > Publish to the web > CSV)
+    cf_url = st.secrets.get("CROWD_CF_CSV_URL", None)
 
-    # Public comps (prefer live, fallback to sample)
+    # Base crowdfunding from URL or local file
+    if cf_url:
+        try:
+            cf = pd.read_csv(cf_url, parse_dates=["round_date"])
+            cf["_source"] = "remote"
+        except Exception as e:
+            st.warning(f"Could not load remote CF CSV ({e}). Falling back to local file.")
+            cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
+            cf["_source"] = "sample"
+    else:
+        cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
+        cf["_source"] = "sample"
+
+    # Normalize sectors and ensure optional cols exist for the estimator
+    cf = _normalize_sector_names(cf)
+    for c in ["arr_eur", "mrr_eur", "gmv_eur", "assumed_take_rate_pct", "headcount"]:
+        if c not in cf.columns:
+            cf[c] = pd.NA
+
+    # Public comps (prefer live file, fallback to sample)
     primary = DATA_DIR / "public_comps.csv"
     fallback = DATA_DIR / "public_comps_sample.csv"
     if primary.exists():
@@ -77,11 +95,12 @@ def load_data():
     else:
         pc = pd.read_csv(fallback)
         src = "public_comps_sample.csv (sample)"
+
     pc = _normalize_sector_names(pc)
-    # Ensure expected columns exist
     for col in ["ev_to_revenue", "ev_rev_method", "sector", "ticker"]:
         if col not in pc.columns:
             pc[col] = pd.NA
+
     return cf, pc, src
 
 # -------- Consistent method per sector (EV/TotalRevenue vs MktCap/TTMRevenue) --
