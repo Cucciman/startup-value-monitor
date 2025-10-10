@@ -24,3 +24,29 @@ ROO.L,Consumer,United Kingdom,Food delivery
 AI,AI-native,USA,C3.ai
 PATH,AI-native,USA,UiPath (automation)
 DARK.L,AI-native,United Kingdom,Darktrace (cyber AI)
+# ---- B2B SaaS
+NOW,B2B SaaS,USA,ServiceNow
+CRM,B2B SaaS,USA,Salesforce
+HUBS,B2B SaaS,USA,HubSpot
+TEAM,B2B SaaS,USA,Atlassian
+WIX,B2B SaaS,Israel,Wix
+
+# ---- AI-native
+AI,AI-native,USA,C3.ai
+PATH,AI-native,USA,UiPath
+PLTR,AI-native,USA,Palantir
+
+# ---- Healthtech
+SHL.DE,Healthtech,Germany,Siemens Healthineers
+PHIA.AS,Healthtech,Netherlands,Philips
+TDOC,Healthtech,USA,Teladoc
+
+# ---- Deeptech
+ASML.AS,Deeptech,Netherlands,ASML
+BESI.AS,Deeptech,Netherlands,Besi
+AIR.PA,Deeptech,France,Airbus
+
+# ---- Consumer
+ZAL.DE,Consumer,Germany,Zalando
+HFG.DE,Consumer,Germany,HelloFresh
+ROO.L,Consumer,United Kingdom,Deliveroo
