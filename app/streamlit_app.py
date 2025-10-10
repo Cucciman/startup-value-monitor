@@ -367,6 +367,8 @@ def main():
         used = per_startup[
             (per_startup["sector"] == chosen) & (per_startup["VGI"].notna())
         ].copy()
+        total_in_sector = int((per_startup["sector"] == chosen).sum())
+        st.caption(f"{len(used)} startups shown (valid VGI) out of {total_in_sector} total rows in {chosen}.")
 
         desired = [
             "sector", "startup", "country",
