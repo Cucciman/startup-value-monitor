@@ -158,22 +158,30 @@ def sector_public_median_by_consistent_method(pc: pd.DataFrame, min_n: int = 1) 
 # ---------------------------- Aggregations ------------------------------------
 
 def sector_summary(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
-    cf_sect = (
-        cf.groupby("sector", as_index=False)
-          .agg({
-              "valuation_pre_money_eur": "median",
-              "amount_raised_eur": "sum",
-              "revenue_last_fy_eur": "median",
-          })
-          .rename(columns={
-              "valuation_pre_money_eur": "cf_median_pre_money",
-              "amount_raised_eur": "cf_total_raised",
-              "revenue_last_fy_eur": "cf_median_revenue",
-          })
-    )
-    pc_med = sector_public_median_by_consistent_method(pc, min_n=1)  # MVP: 1
-    return cf_sect.merge(pc_med, on="sector", how="left")
+    # Make a copy and ensure required numeric columns exist
+    cf2 = cf.copy()
+    required = ["valuation_pre_money_eur", "amount_raised_eur", "revenue_last_fy_eur"]
+    for c in required:
+        if c not in cf2.columns:
+            cf2[c] = pd.NA
 
+    # Coerce to numeric
+    for c in required:
+        cf2[c] = pd.to_numeric(cf2[c], errors="coerce")
+
+    # Group and compute CF medians/sums
+    cf_sect = (
+        cf2.groupby("sector", as_index=False)
+           .agg(
+               cf_median_pre_money=("valuation_pre_money_eur", "median"),
+               cf_total_raised=("amount_raised_eur", "sum"),
+               cf_median_revenue=("revenue_last_fy_eur", "median"),
+           )
+    )
+
+    # Merge with public comps median (consistent method)
+    pc_med = sector_public_median_by_consistent_method(pc, min_n=1)  # MVP coverage
+    return cf_sect.merge(pc_med, on="sector", how="left")
 def compute_vgi(df: pd.DataFrame) -> pd.DataFrame:
     """Sector-level VGI = (CF EV/Rev) / (Public EV/Rev)."""
     out = df.copy()
