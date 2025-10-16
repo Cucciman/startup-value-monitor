@@ -342,9 +342,6 @@ def load_data():
     return cf, pc, source
 
 # Quick diagnostics in the sidebar
-with st.expander("Diagnostics: sector coverage", expanded=False):
-    st.write("Crowdfunding sectors:", cf["sector"].value_counts(dropna=False) if "sector" in cf.columns else "no 'sector' col")
-    st.write("Public comps sectors:", pc["sector"].value_counts(dropna=False) if "sector" in pc.columns else "no 'sector' col")
 
     # Public comps (unchanged)
     primary = DATA_DIR / "public_comps.csv"
