@@ -44,7 +44,7 @@ def load_cf_pc():
         except Exception:
             pc = None
     if pc is None or not isinstance(pc, pd.DataFrame) or pc.empty:
-	from src.public_comps import load_public_comps
+from src.public_comps import load_public_comps
 	pc = load_public_comps()
         pc["_pc_source"] = "local_csv"
 
