@@ -5,7 +5,6 @@ import streamlit as st
 
 import sys, pathlib
 sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent / "src"))
-from public_comps import load_public_comps
 
 # --- Portable loader for src/public_comps.py (works locally & on Streamlit Cloud)
 import importlib.util, pathlib, sys
@@ -73,7 +72,6 @@ if 'load_public_comps' in globals():
         pc = None
 
 if pc is None or not isinstance(pc, pd.DataFrame) or pc.empty:
-    from src.public_comps import load_public_comps
     pc = load_public_comps()
     pc["_pc_source"] = "local_csv"
 
