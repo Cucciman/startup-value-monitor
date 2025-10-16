@@ -33,35 +33,99 @@ if load_public_comps is None:
         return df
 
 # ---------- Unified loader that always returns (cf, pc, source) ----------
+# ---------- Crowdfunding data loader with validation & clear reasons ----------
 from pathlib import Path
 import pandas as pd
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
+# Minimal required columns (make source_url optional to avoid blocking)
+_REQUIRED_CORE = {"startup", "country", "sector", "platform", "round_date", "valuation_pre_money_eur"}
+
+def _valid_cf(df: pd.DataFrame) -> tuple[bool, str]:
+    if not isinstance(df, pd.DataFrame) or df is None or df.empty:
+        return False, "empty dataframe"
+    cols = {c.strip().lower() for c in df.columns}
+    missing = _REQUIRED_CORE - cols
+    if missing:
+        return False, f"missing required columns: {sorted(missing)}"
+    return True, "ok"
+
+def load_crowdfunding() -> pd.DataFrame:
+    """Load CF with strict preference and show why a source was rejected:
+       1) Google Sheet (st.secrets['GOOGLE_SHEET_CSV'])
+       2) data/crowdfunding_live.csv
+       3) data/crowdfunding_sample.csv
+    """
+    # 1) Google Sheet (if configured)
+    sheet_url = ""
+    try:
+        import streamlit as st
+        sheet_url = (st.secrets.get("GOOGLE_SHEET_CSV") or "").strip()
+    except Exception:
+        sheet_url = ""
+    if sheet_url:
+        try:
+            df = pd.read_csv(sheet_url)
+            ok, reason = _valid_cf(df)
+            if ok:
+                df["_source"] = "google_sheet_csv"
+                return df
+            else:
+                try:
+                    import streamlit as st
+                    st.info(f"Google Sheet loaded but rejected: {reason} — falling back.")
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                import streamlit as st
+                st.info(f"Could not load Google Sheet ({e}) — falling back.")
+            except Exception:
+                pass
+
+    # 2) Local live CSV
+    live_path = DATA_DIR / "crowdfunding_live.csv"
+    if live_path.exists():
+        try:
+            df = pd.read_csv(live_path)
+            ok, reason = _valid_cf(df)
+            if ok:
+                df["_source"] = "local_live_csv"
+                return df
+            else:
+                try:
+                    import streamlit as st
+                    st.info(f"Local live CSV exists but rejected: {reason} — falling back.")
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                import streamlit as st
+                st.info(f"Could not read local live CSV ({e}) — falling back.")
+            except Exception:
+                pass
+
+    # 3) Sample CSV
+    sample_path = DATA_DIR / "crowdfunding_sample.csv"
+    try:
+        df = pd.read_csv(sample_path)
+        df["_source"] = "sample_csv"
+        return df
+    except Exception as e:
+        try:
+            import streamlit as st
+            st.error(f"Failed to load crowdfunding data from all sources ({e}).")
+        except Exception:
+            pass
+        return pd.DataFrame()
+
 def load_cf_pc():
     """Return (cf, pc, source) with robust fallbacks and sector normalization."""
-    # --- Crowdfunding
-    cf = None
-    # Prefer an existing helper if present
-    if 'load_crowdfunding' in globals():
-        try:
-            cf = load_crowdfunding()
-        except Exception:
-            cf = None
-    if cf is None or not isinstance(cf, pd.DataFrame) or cf.empty:
-        # Try local live CSV
-        try:
-            cf = pd.read_csv(DATA_DIR / "crowdfunding_live.csv", parse_dates=["round_date"])
-            if isinstance(cf, pd.DataFrame) and not cf.empty:
-                cf["_source"] = "local_live_csv"
-            else:
-                cf = None
-        except Exception:
-            cf = None
-    if cf is None or cf.empty:
-        # Fall back to sample
-        cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
-        cf["_source"] = "sample_csv"
+
+    # --- Crowdfunding (use helper) ---
+    cf = load_crowdfunding()
+    source = (cf["_source"].iloc[0] if ("_source" in cf.columns and not cf.empty) else "unknown")
 
 # --- Public comps
 pc = None
