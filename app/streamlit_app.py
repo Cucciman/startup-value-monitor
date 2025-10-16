@@ -32,7 +32,59 @@ def _normalize_sector_names(df, col="sector"):
     df[col] = key.map(SIFTED_SECTORS).fillna(df[col])
     return df
 
-DATA_DIR = pathlib.Path(__file__).resolve().parents[1] / "data"
+# ---------- Crowdfunding data loader with robust fallbacks ----------
+from pathlib import Path
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+def load_crowdfunding() -> pd.DataFrame:
+    """Load crowdfunding data with strict fallback logic:
+       1) Google Sheet (if configured) AND non-empty
+       2) Local live CSV (data/crowdfunding_live.csv) if non-empty
+       3) Sample CSV (data/crowdfunding_sample.csv)
+    """
+    # 1) Try Google Sheet CSV if set
+    sheet_url = ""
+    try:
+        sheet_url = (st.secrets.get("GOOGLE_SHEET_CSV") or "").strip()
+    except Exception:
+        sheet_url = ""
+    if sheet_url:
+        try:
+            df = pd.read_csv(sheet_url)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                df["_source"] = "google_sheet"
+                return df
+            else:
+                st.info("Google Sheet loaded but empty — falling back.")
+        except Exception as e:
+            st.info(f"Could not load Google Sheet ({e}) — falling back.")
+
+    # 2) Try local live CSV
+    live_path = DATA_DIR / "crowdfunding_live.csv"
+    if live_path.exists():
+        try:
+            df = pd.read_csv(live_path)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                df["_source"] = "local_live_csv"
+                return df
+            else:
+                st.info("Local live CSV exists but is empty — falling back.")
+        except Exception as e:
+            st.info(f"Could not read local live CSV ({e}) — falling back.")
+
+    # 3) Fall back to sample CSV
+    sample_path = DATA_DIR / "crowdfunding_sample.csv"
+    try:
+        df = pd.read_csv(sample_path)
+        df["_source"] = "sample_csv"
+        return df
+    except Exception as e:
+        st.error(f"Failed to load crowdfunding data from all sources ({e}).")
+        return pd.DataFrame()
+
+# Use it:
+cf = load_crowdfunding()
+st.caption(f"Crowdfunding source: {cf.get('_source', pd.Series()).iloc[0] if not cf.empty else 'none'} • rows: {len(cf)}")
 
 # ---------------------------- Sector normalization ----------------------------
 
