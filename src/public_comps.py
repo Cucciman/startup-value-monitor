@@ -1,118 +1,161 @@
-import sys, time
+# src/public_comps.py
+# Robust public-comps loader that prefers a BME Growth CSV from secrets
+# and falls back to data/public_comps.csv. Computes EV/Revenue with
+# multiple safe fallbacks and normalizes sectors to your Sifted taxonomy.
+
+from pathlib import Path
 import pandas as pd
-import yfinance as yf
-from datetime import datetime, UTC
+import os
 
-WATCHLIST = "data/public_comps_watchlist.csv"
-OUTFILE = "data/public_comps.csv"
+# Streamlit may not exist when running locally; import lazily
+try:
+    import streamlit as st  # type: ignore
+except Exception:
+    class _Dummy:
+        secrets = {}
+    st = _Dummy()  # type: ignore
 
-def _ttm_revenue_from_quarterlies(t: yf.Ticker):
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+SIFTED_SECTORS = {
+    "fintech": "Fintech",
+    "b2b saas": "B2B SaaS",
+    "saas": "B2B SaaS",
+    "software": "B2B SaaS",
+    "climate": "Climate",
+    "climate tech": "Climate",
+    "climatetech": "Climate",
+    "consumer": "Consumer",
+    "healthtech": "Healthtech",
+    "health tech": "Healthtech",
+    "medtech": "Healthtech",
+    "deeptech": "Deeptech",
+    "deep tech": "Deeptech",
+    "ai-native": "AI-native",
+    "ai native": "AI-native",
+    "ai": "AI-native",
+}
+
+def _norm_sector(s: pd.Series) -> pd.Series:
+    if s is None:
+        return s
+    key = s.astype(str).str.strip().str.lower()
+    return key.map(SIFTED_SECTORS).fillna(s)
+
+def _first_nonnull(df: pd.DataFrame, cols: list[str]) -> pd.Series:
+    out = pd.Series(pd.NA, index=df.index, dtype="object")
+    for c in cols:
+        if c in df.columns:
+            tmp = df[c]
+            out = out.where(out.notna(), tmp)
+    return out
+
+def _to_num(df: pd.DataFrame, cols: list[str]):
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+def _compute_ev_rev(df: pd.DataFrame) -> pd.DataFrame:
+    # Try EV first, fall back to Market Cap if EV missing.
+    ev = _first_nonnull(df, ["enterprise_value", "ev", "enterprisevalue"])
+    mcap = _first_nonnull(df, ["market_cap", "marketcap", "mkt_cap"])
+    revenue = _first_nonnull(df, ["revenue_ttm", "revenue_total", "revenue", "sales_ttm"])
+
+    # numeric
+    tmp = pd.DataFrame({"ev": ev, "mcap": mcap, "revenue": revenue})
+    _to_num(tmp, ["ev", "mcap", "revenue"])
+
+    method = pd.Series(pd.NA, index=df.index, dtype="string")
+    ev_rev = pd.Series(pd.NA, index=df.index, dtype="Float64")
+
+    # Method A: EV / Revenue
+    mask_a = tmp["ev"].notna() & tmp["revenue"].notna() & (tmp["revenue"] > 0)
+    ev_rev[mask_a] = tmp.loc[mask_a, "ev"] / tmp.loc[mask_a, "revenue"]
+    method[mask_a] = "EV/Revenue"
+
+    # Method B: MarketCap / Revenue (only where A unavailable)
+    mask_b = ev_rev.isna() & tmp["mcap"].notna() & tmp["revenue"].notna() & (tmp["revenue"] > 0)
+    ev_rev[mask_b] = tmp.loc[mask_b, "mcap"] / tmp.loc[mask_b, "revenue"]
+    method[mask_b] = "MktCap/Revenue"
+
+    out = df.copy()
+    out["ev_to_revenue"] = ev_rev
+    out["ev_rev_method"] = method
+    return out
+
+def _read_bme_growth_csv() -> pd.DataFrame | None:
+    # Prefer Streamlit secrets; else environment variable
+    url = ""
     try:
-        q = getattr(t, "quarterly_income_stmt", None)
-        if isinstance(q, pd.DataFrame) and not q.empty:
-            candidates = [r for r in q.index if isinstance(r, str) and "revenue" in r.lower()]
-            if candidates:
-                rev_row = candidates[0]
-                vals = pd.to_numeric(q.loc[rev_row].dropna(), errors="coerce").sort_index(ascending=False)
-                return vals.iloc[:4].sum() if len(vals) >= 1 else None
+        url = (st.secrets.get("BME_GROWTH_CSV_URL") or "").strip()
     except Exception:
-        pass
-    return None
+        url = os.getenv("BME_GROWTH_CSV_URL", "").strip()
 
-def fetch_public_comps():
-    rows = []
-    wl = pd.read_csv(WATCHLIST, comment='#')
+    if not url:
+        return None
 
-    for _, r in wl.iterrows():
-        ticker = r["ticker"]
-        sector = r.get("sector")
-        country = r.get("country")
-        notes = r.get("notes", "")
-        method = None
-        ev_to_rev = None
-        enterprise_value = None
-        market_cap = None
-        revenue_total = None
-        revenue_ttm = None
+    try:
+        raw = pd.read_csv(url)
+    except Exception:
+        return None
 
-        try:
-            t = yf.Ticker(ticker)
+    if raw is None or raw.empty:
+        return None
 
-            # Try Method 1: EV / Total Revenue (from .info)
-            info = {}
-            try:
-                info = t.info or {}
-            except Exception:
-                info = {}
+    # Standardize column names to snake_case for resilience
+    raw.columns = [c.strip().lower().replace(" ", "_") for c in raw.columns]
 
-            enterprise_value = info.get("enterpriseValue")
-            revenue_total = info.get("totalRevenue")
+    # Harmonize minimum fields
+    # Expected possibilities:
+    # - ticker, name, sector, country
+    # - enterprise_value / market_cap
+    # - revenue_ttm / revenue_total
+    # If your sheet uses different headers, add them here.
+    needed_any = set(raw.columns)
+    if "ticker" not in needed_any:
+        # try symbol or isin as ticker
+        guess = _first_nonnull(raw, ["symbol", "isin"])
+        raw["ticker"] = guess
 
-            if enterprise_value and revenue_total and float(revenue_total) > 0:
-                ev_to_rev = float(enterprise_value) / float(revenue_total)
-                method = "EV/TotalRevenue"
+    df = raw.copy()
+    df["sector"] = _norm_sector(_first_nonnull(df, ["sector", "industry", "vertical"]))
+    df["country"] = _first_nonnull(df, ["country", "listing_country", "hq_country"])
+    df = _compute_ev_rev(df)
 
-            # If Method 1 unavailable, try Method 2: MarketCap / TTM revenue (from quarterlies)
-            if ev_to_rev is None:
-                market_cap = info.get("marketCap")
-                if not market_cap:
-                    fast = getattr(t, "fast_info", {}) or {}
-                    market_cap = fast.get("market_cap")
-
-                revenue_ttm = _ttm_revenue_from_quarterlies(t)
-                if market_cap and revenue_ttm and float(revenue_ttm) > 0:
-                    ev_to_rev = float(market_cap) / float(revenue_ttm)
-                    method = "MktCap/TTMRevenue"
-
-            # Light metadata
-            fast = getattr(t, "fast_info", {}) or {}
-            price = fast.get("last_price")
-            currency = fast.get("currency")
-            pe = fast.get("pe_ratio")
-
-            rows.append({
-                "ticker": ticker,
-                "sector": sector,
-                "country": country,
-                "notes": notes,
-                "enterprise_value": enterprise_value,
-                "market_cap": market_cap,
-                "revenue_total": revenue_total,
-                "revenue_ttm": revenue_ttm,
-                "ev_to_revenue": ev_to_rev,
-                "ev_rev_method": method,
-                "pe_ttm": pe,
-                "price": price,
-                "currency": currency,
-                "data_date": datetime.now(UTC).date().isoformat(),
-            })
-        except Exception as e:
-            rows.append({
-                "ticker": ticker,
-                "sector": sector,
-                "country": country,
-                "notes": f"error: {e}",
-                "enterprise_value": None,
-                "market_cap": None,
-                "revenue_total": None,
-                "revenue_ttm": None,
-                "ev_to_revenue": None,
-                "ev_rev_method": None,
-                "pe_ttm": None,
-                "price": None,
-                "currency": None,
-                "data_date": datetime.now(UTC).date().isoformat(),
-            })
-
-        time.sleep(0.5)  # be polite
-
-    df = pd.DataFrame(rows)
-    df.to_csv(OUTFILE, index=False)
-    print(f"wrote {OUTFILE} with {len(df)} rows")
+    # Keep a clean subset plus useful metadata
+    keep = [c for c in [
+        "ticker", "name", "sector", "country",
+        "enterprise_value", "market_cap",
+        "revenue_ttm", "revenue_total",
+        "ev_to_revenue", "ev_rev_method",
+    ] if c in df.columns]
+    df = df[keep].drop_duplicates()
+    df["_source"] = "bme_growth_csv"
     return df
 
-if __name__ == "__main__":
-    try:
-        fetch_public_comps()
-    except KeyboardInterrupt:
-        sys.exit(0)
+def _read_local_csv() -> pd.DataFrame:
+    p = DATA_DIR / "public_comps.csv"
+    if not p.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(p)
+    if "sector" in df.columns:
+        df["sector"] = _norm_sector(df["sector"])
+    df["_source"] = "local_public_csv"
+    return df
+
+def load_public_comps() -> pd.DataFrame:
+    """Main entry point used by the Streamlit app."""
+    # 1) Try BME Growth CSV from secrets
+    bme = _read_bme_growth_csv()
+    if isinstance(bme, pd.DataFrame) and not bme.empty:
+        return bme
+
+    # 2) Fall back to local CSV committed in repo
+    local = _read_local_csv()
+    if not local.empty:
+        return local
+
+    # 3) Last resort: empty frame
+    return pd.DataFrame(columns=[
+        "ticker","name","sector","country","ev_to_revenue","ev_rev_method","_source"
+    ])
