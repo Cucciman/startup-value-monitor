@@ -93,24 +93,34 @@ def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFra
 
 @st.cache_data
 def load_data():
+    # 1) Try live unified CSV first
     cf_live = DATA_DIR / "crowdfunding_live.csv"
+    cf = None
     if cf_live.exists():
-        cf = pd.read_csv(cf_live, parse_dates=["round_date"], dayfirst=False)
-        cf["_source"] = "crowdfunding_live.csv"
-    else:
-        # Optional Google Sheets CSV via secret
+        try:
+            cf_tmp = pd.read_csv(cf_live, parse_dates=["round_date"], dayfirst=False)
+            if len(cf_tmp) > 0:
+                cf = cf_tmp.copy()
+                cf["_source"] = "crowdfunding_live.csv"
+        except Exception as e:
+            st.warning(f"Could not read crowdfunding_live.csv ({e}). Will try remote/sample.")
+
+    # 2) If live is missing or empty, try Google Sheet secret
+    if cf is None:
         cf_url = st.secrets.get("CROWD_CF_CSV_URL", None)
         if cf_url:
             try:
-                cf = pd.read_csv(cf_url, parse_dates=["round_date"])
-                cf["_source"] = "remote"
+                cf_tmp = pd.read_csv(cf_url, parse_dates=["round_date"])
+                if len(cf_tmp) > 0:
+                    cf = cf_tmp.copy()
+                    cf["_source"] = "remote"
             except Exception as e:
-                st.warning(f"Could not load remote CF CSV ({e}). Falling back to sample.")
-                cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
-                cf["_source"] = "sample"
-        else:
-            cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
-            cf["_source"] = "sample"
+                st.warning(f"Could not load remote CF CSV ({e}). Will use sample.")
+
+    # 3) Fallback to sample
+    if cf is None:
+        cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
+        cf["_source"] = "sample"
 
     # Public comps (unchanged)
     primary = DATA_DIR / "public_comps.csv"
@@ -122,7 +132,7 @@ def load_data():
         pc = pd.read_csv(fallback)
         src = "public_comps_sample.csv (sample)"
 
-    # If you use a sector normalizer function, call it here
+    # Light normalization
     if "sector" in cf.columns:
         cf["sector"] = cf["sector"].astype(str).str.strip()
 
