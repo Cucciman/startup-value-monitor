@@ -1,4 +1,21 @@
 platform,source_url,startup,country,sector,valuation_pre_money_eur,amount_raised_eur,round_date,revenue_last_fy_eur,arr_eur,mrr_eur,gmv_eur,assumed_take_rate_pct,headcount,rev_source,confidence
-Crowdcube,https://www.crowdcube.com/companies/finexos/pitches/bnq1k0,Finexos,UK,Fintech,12000000,800000,2025-09-15,1200000,,,,,,audited_revenue,High
+Crowdcube,https://www.crowdcube.com/companies/finexos/pitches/a1,Finexos,UK,Fintech,12000000,800000,2025-09-15,1200000,,,,,,audited_revenue,High
 Seedrs,https://www.seedrs.com/oddbox,Oddbox,UK,Consumer,7000000,350000,2025-08-10,50000000,,,,,,platform page,Low
-Crowdcube,https://www.crowdcube.com/companies/olio/pitches/bnq1k0,Olio,UK,Climate,9000000,600000,2025-10-01,2500000,,,,,,audited_revenue,High
+Crowdcube,https://www.crowdcube.com/companies/olio/pitches/a2,Olio,UK,Climate,9000000,600000,2025-10-01,2500000,,,,,,audited_revenue,High
+Seedrs,https://www.seedrs.com/paywave,PayWave,IE,Fintech,15000000,950000,2025-09-05,2200000,,,,,,audited_revenue,Medium
+Crowdcube,https://www.crowdcube.com/companies/greengrid/pitches/a3,GreenGrid,DE,Climate,11000000,500000,2025-07-22,1800000,,,,,,audited_revenue,Medium
+Seedrs,https://www.seedrs.com/shoply,Shoply,FR,Consumer,8000000,420000,2025-06-18,12000000,,,,,,platform page,Low
+Crowdcube,https://www.crowdcube.com/companies/meditron/pitches/a4,Meditron,ES,Healthtech,10000000,450000,2025-05-12,3000000,,,,,,audited_revenue,High
+Seedrs,https://www.seedrs.com/aiworkbench,AI Workbench,NL,AI-native,13000000,700000,2025-07-30,1600000,2000000,,,,,model,Medium
+Crowdcube,https://www.crowdcube.com/companies/cloudlane/pitches/a5,CloudLane,SE,B2B SaaS,9000000,300000,2025-08-28,1400000,1600000,,,,,model,Medium
+Seedrs,https://www.seedrs.com/robovision,RoboVision,PL,Deeptech,20000000,1000000,2025-09-09,4000000,,,,,,audited_revenue,High
+Crowdcube,https://www.crowdcube.com/companies/healthio/pitches/a6,Healthio,IT,Healthtech,9500000,320000,2025-04-09,2100000,,,,,,audited_revenue,Medium
+Seedrs,https://www.seedrs.com/cleanair,CleanAir,DK,Climate,12000000,650000,2025-03-25,1900000,,,,,,audited_revenue,Medium
+Crowdcube,https://www.crowdcube.com/companies/synthex/pitches/a7,Synthex,FI,Deeptech,22000000,800000,2025-08-14,3500000,,,,,,audited_revenue,Medium
+Seedrs,https://www.seedrs.com/dinefast,DineFast,ES,Consumer,6000000,250000,2025-05-27,9000000,,,,,,platform page,Low
+Crowdcube,https://www.crowdcube.com/companies/quantpay/pitches/a8,QuantPay,DE,Fintech,14000000,520000,2025-09-01,2000000,,,,,,audited_revenue,High
+Seedrs,https://www.seedrs.com/bytecloud,ByteCloud,UK,B2B SaaS,10000000,400000,2025-06-05,1500000,1800000,,,,,model,Medium
+Crowdcube,https://www.crowdcube.com/companies/theranomi/pitches/a9,Theranomi,SE,Healthtech,11500000,610000,2025-07-03,2600000,,,,,,audited_revenue,High
+Seedrs,https://www.seedrs.com/neuroforge,NeuroForge,FR,AI-native,12500000,480000,2025-08-19,1700000,1900000,,,,,model,Medium
+Crowdcube,https://www.crowdcube.com/companies/nanolith/pitches/a10,Nanolith,IT,Deeptech,18000000,720000,2025-06-29,3300000,,,,,,audited_revenue,Medium
+Seedrs,https://www.seedrs.com/loopcart,LoopCart,NL,Consumer,7500000,310000,2025-07-17,10000000,,,,,,platform page,Low
