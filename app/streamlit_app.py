@@ -272,6 +272,8 @@ with st.expander("Diagnostics: sector coverage", expanded=False):
     if "sector" in cf.columns:
         cf["sector"] = cf["sector"].astype(str).str.strip()
 
+def load_crowdfunding():
+    ...
     return cf, pc, src
 
 # -------- Consistent method per sector (EV/TotalRevenue vs MktCap/TTMRevenue) --
