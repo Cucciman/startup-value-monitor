@@ -7,6 +7,32 @@ import sys, pathlib
 sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 from public_comps import load_public_comps
 
+# --- Portable loader for src/public_comps.py (works locally & on Streamlit Cloud)
+import importlib.util, pathlib, sys
+APP_DIR = pathlib.Path(__file__).resolve().parent          # /app
+ROOT_DIR = APP_DIR.parent                                  # project root
+PUBLIC_COMPS_PATH = ROOT_DIR / "src" / "public_comps.py"
+
+def _load_public_comps_func():
+    if PUBLIC_COMPS_PATH.exists():
+        spec = importlib.util.spec_from_file_location("public_comps", str(PUBLIC_COMPS_PATH))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore
+        return getattr(mod, "load_public_comps", None)
+    return None
+
+load_public_comps = _load_public_comps_func()
+
+# Fallback: if module couldn't be imported, keep the app alive using local CSV
+if load_public_comps is None:
+    import pandas as pd
+    def load_public_comps():
+        p = ROOT_DIR / "data" / "public_comps.csv"
+        df = pd.read_csv(p) if p.exists() else pd.DataFrame()
+        if not df.empty and "_pc_source" not in df.columns:
+            df["_pc_source"] = "local_public_csv"
+        return df
+
 # ---------- Unified loader that always returns (cf, pc, source) ----------
 from pathlib import Path
 import pandas as pd
