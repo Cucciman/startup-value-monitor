@@ -39,6 +39,22 @@ import streamlit as st
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
+def load_public_comps() -> pd.DataFrame:
+    """Load data/public_comps.csv and validate minimal columns."""
+    path = DATA_DIR / "public_comps.csv"
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        st.error(f"Failed to load public comps: {e}")
+        return pd.DataFrame()
+
+    # Minimal columns we need
+    needed = {"sector", "ev_to_revenue"}
+    if not needed.issubset({c.strip().lower() for c in df.columns}):
+        st.warning("public_comps.csv missing required columns (needs sector and ev_to_revenue).")
+    df["_pc_source"] = "local_csv"
+    return df
+
 _REQUIRED_COLS = {
     "platform","source_url","startup","country","sector",
     "valuation_pre_money_eur","amount_raised_eur","round_date",
@@ -200,6 +216,47 @@ def load_data():
     if cf is None:
         cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
         cf["_source"] = "sample"
+
+# ---------------------------------------------------------------
+# Load public comps + normalize sector names for consistency
+# ---------------------------------------------------------------
+
+pc = load_public_comps()
+
+SIFTED_SECTORS = {
+    "fintech": "Fintech",
+    "b2b saas": "B2B SaaS",
+    "saas": "B2B SaaS",
+    "software": "B2B SaaS",
+    "climate": "Climate",
+    "climate tech": "Climate",
+    "climatetech": "Climate",
+    "consumer": "Consumer",
+    "healthtech": "Healthtech",
+    "health tech": "Healthtech",
+    "medtech": "Healthtech",
+    "deeptech": "Deeptech",
+    "deep tech": "Deeptech",
+    "ai-native": "AI-native",
+    "ai native": "AI-native",
+    "ai": "AI-native",
+}
+
+def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFrame:
+    if df is None or df.empty or col not in df.columns:
+        return df
+    key = df[col].astype(str).str.strip().str.lower()
+    df[col] = key.map(SIFTED_SECTORS).fillna(df[col])
+    return df
+
+# Apply to both datasets
+cf = _normalize_sector_names(cf, "sector")
+pc = _normalize_sector_names(pc, "sector")
+
+# Quick diagnostics in the sidebar
+with st.expander("Diagnostics: sector coverage", expanded=False):
+    st.write("Crowdfunding sectors:", cf["sector"].value_counts(dropna=False) if "sector" in cf.columns else "no 'sector' col")
+    st.write("Public comps sectors:", pc["sector"].value_counts(dropna=False) if "sector" in pc.columns else "no 'sector' col")
 
     # Public comps (unchanged)
     primary = DATA_DIR / "public_comps.csv"
