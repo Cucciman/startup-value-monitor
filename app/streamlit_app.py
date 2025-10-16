@@ -194,16 +194,6 @@ def load_crowdfunding() -> pd.DataFrame:
         st.error(f"Failed to load crowdfunding data from all sources ({e}).")
         return pd.DataFrame()
 
-# ---- Use it + show diagnostics on screen
-cf = load_crowdfunding()
-st.caption(
-    f"Crowdfunding source: "
-    f"{(cf['_source'].iloc[0] if ('_source' in cf.columns and not cf.empty) else 'none')} "
-    f"• rows: {len(cf)}"
-)
-with st.expander("Diagnostics: crowdfunding data sample", expanded=False):
-    st.write(cf.head(10))
-    st.write("Columns:", list(cf.columns))
 
 # ---------------------------- Sector normalization ----------------------------
 
@@ -578,6 +568,29 @@ def compute_startup_vgi(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------- UI ---------------------------------------------
 
 def main():
+# Load both datasets in one go (uses your updated load_data())
+cf, pc, source = load_data()
+st.caption(f"Crowdfunding source: {source} • rows: {len(cf)}")
+
+# Diagnostics: crowdfunding sample
+with st.expander("Diagnostics: crowdfunding data sample", expanded=False):
+    if isinstance(cf, pd.DataFrame) and not cf.empty:
+        st.write(cf.head(10))
+        st.write("Columns:", list(cf.columns))
+    else:
+        st.write("No crowdfunding rows loaded.")
+
+# Diagnostics: sector coverage
+with st.expander("Diagnostics: sector coverage", expanded=False):
+    if isinstance(cf, pd.DataFrame) and not cf.empty and "sector" in cf.columns:
+        st.write("Crowdfunding sectors:", cf["sector"].value_counts(dropna=False))
+    else:
+        st.write("Crowdfunding sectors: none")
+
+    if isinstance(pc, pd.DataFrame) and not pc.empty and "sector" in pc.columns:
+        st.write("Public comps sectors:", pc["sector"].value_counts(dropna=False))
+    else:
+        st.write("Public comps sectors: none")
     st.set_page_config(page_title="Startup Value Monitor", layout="wide")
     st.title("Startup Value Monitor — VGI (MVP)")
     st.caption("Comparing crowdfunding valuations with public-market multiples.")
