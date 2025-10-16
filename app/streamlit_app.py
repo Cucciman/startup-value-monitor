@@ -32,17 +32,37 @@ def _normalize_sector_names(df, col="sector"):
     df[col] = key.map(SIFTED_SECTORS).fillna(df[col])
     return df
 
-# ---------- Crowdfunding data loader with robust fallbacks ----------
+# ---------- Crowdfunding data loader with robust validation, fallbacks, and diagnostics ----------
 from pathlib import Path
+import pandas as pd
+import streamlit as st
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
+_REQUIRED_COLS = {
+    "platform","source_url","startup","country","sector",
+    "valuation_pre_money_eur","amount_raised_eur","round_date",
+    # optional but part of our schema:
+    "revenue_last_fy_eur","arr_eur","mrr_eur","gmv_eur","assumed_take_rate_pct","headcount",
+    "rev_source","confidence"
+}
+
+def _valid_cf(df: pd.DataFrame) -> bool:
+    """Basic schema sanity: must be a DF, non-empty, and include core columns."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return False
+    cols = {c.strip().lower() for c in df.columns}
+    core = {"platform","source_url","startup","country","sector"}
+    return core.issubset(cols)
+
 def load_crowdfunding() -> pd.DataFrame:
-    """Load crowdfunding data with strict fallback logic:
-       1) Google Sheet (if configured) AND non-empty
-       2) Local live CSV (data/crowdfunding_live.csv) if non-empty
-       3) Sample CSV (data/crowdfunding_sample.csv)
     """
-    # 1) Try Google Sheet CSV if set
+    Load crowdfunding data with strict, validated fallback order:
+      1) Google Sheet (if GOOGLE_SHEET_CSV secret set) AND passes _valid_cf
+      2) Local live CSV (data/crowdfunding_live.csv) if passes _valid_cf
+      3) Sample CSV (data/crowdfunding_sample.csv)
+    """
+    # 1) Google Sheet
     sheet_url = ""
     try:
         sheet_url = (st.secrets.get("GOOGLE_SHEET_CSV") or "").strip()
@@ -51,28 +71,28 @@ def load_crowdfunding() -> pd.DataFrame:
     if sheet_url:
         try:
             df = pd.read_csv(sheet_url)
-            if isinstance(df, pd.DataFrame) and not df.empty:
+            if _valid_cf(df):
                 df["_source"] = "google_sheet"
                 return df
             else:
-                st.info("Google Sheet loaded but empty — falling back.")
+                st.info("Google Sheet loaded but missing required columns — falling back.")
         except Exception as e:
             st.info(f"Could not load Google Sheet ({e}) — falling back.")
 
-    # 2) Try local live CSV
+    # 2) Local live CSV
     live_path = DATA_DIR / "crowdfunding_live.csv"
     if live_path.exists():
         try:
             df = pd.read_csv(live_path)
-            if isinstance(df, pd.DataFrame) and not df.empty:
+            if _valid_cf(df):
                 df["_source"] = "local_live_csv"
                 return df
             else:
-                st.info("Local live CSV exists but is empty — falling back.")
+                st.info("Local live CSV exists but missing required columns — falling back.")
         except Exception as e:
             st.info(f"Could not read local live CSV ({e}) — falling back.")
 
-    # 3) Fall back to sample CSV
+    # 3) Sample CSV
     sample_path = DATA_DIR / "crowdfunding_sample.csv"
     try:
         df = pd.read_csv(sample_path)
@@ -82,9 +102,16 @@ def load_crowdfunding() -> pd.DataFrame:
         st.error(f"Failed to load crowdfunding data from all sources ({e}).")
         return pd.DataFrame()
 
-# Use it:
+# ---- Use it + show diagnostics on screen
 cf = load_crowdfunding()
-st.caption(f"Crowdfunding source: {cf.get('_source', pd.Series()).iloc[0] if not cf.empty else 'none'} • rows: {len(cf)}")
+st.caption(
+    f"Crowdfunding source: "
+    f"{(cf['_source'].iloc[0] if ('_source' in cf.columns and not cf.empty) else 'none')} "
+    f"• rows: {len(cf)}"
+)
+with st.expander("Diagnostics: crowdfunding data sample", expanded=False):
+    st.write(cf.head(10))
+    st.write("Columns:", list(cf.columns))
 
 # ---------------------------- Sector normalization ----------------------------
 
