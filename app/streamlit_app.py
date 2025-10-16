@@ -3,6 +3,35 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 
+# Standardize sector names to Sifted taxonomy
+SIFTED_SECTORS = {
+    "fintech": "Fintech",
+    "b2b saas": "B2B SaaS",
+    "saas": "B2B SaaS",
+    "software": "B2B SaaS",
+    "climate": "Climate",
+    "climate tech": "Climate",
+    "climatetech": "Climate",
+    "consumer": "Consumer",
+    "healthtech": "Healthtech",
+    "health tech": "Healthtech",
+    "medtech": "Healthtech",
+    "deeptech": "Deeptech",
+    "deep tech": "Deeptech",
+    "ai-native": "AI-native",
+    "ai native": "AI-native",
+    "ai": "AI-native",
+}
+
+def _normalize_sector_names(df, col="sector"):
+    """Normalize sector names according to the Sifted taxonomy."""
+    if col not in df.columns:
+        return df
+    s = df[col].astype(str).str.strip()
+    key = s.str.lower()
+    df[col] = key.map(SIFTED_SECTORS).fillna(df[col])
+    return df
+
 DATA_DIR = pathlib.Path(__file__).resolve().parents[1] / "data"
 
 # ---------------------------- Sector normalization ----------------------------
