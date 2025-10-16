@@ -3,6 +3,82 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 
+# ---------- Unified loader that always returns (cf, pc, source) ----------
+from pathlib import Path
+import pandas as pd
+
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+def load_cf_pc():
+    """Return (cf, pc, source) with robust fallbacks and sector normalization."""
+    # --- Crowdfunding
+    cf = None
+    # Prefer an existing helper if present
+    if 'load_crowdfunding' in globals():
+        try:
+            cf = load_crowdfunding()
+        except Exception:
+            cf = None
+    if cf is None or not isinstance(cf, pd.DataFrame) or cf.empty:
+        # Try local live CSV
+        try:
+            cf = pd.read_csv(DATA_DIR / "crowdfunding_live.csv", parse_dates=["round_date"])
+            if isinstance(cf, pd.DataFrame) and not cf.empty:
+                cf["_source"] = "local_live_csv"
+            else:
+                cf = None
+        except Exception:
+            cf = None
+    if cf is None or cf.empty:
+        # Fall back to sample
+        cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
+        cf["_source"] = "sample_csv"
+
+    # --- Public comps
+    pc = None
+    if 'load_public_comps' in globals():
+        try:
+            pc = load_public_comps()
+        except Exception:
+            pc = None
+    if pc is None or not isinstance(pc, pd.DataFrame) or pc.empty:
+        pc = pd.read_csv(DATA_DIR / "public_comps.csv")
+        pc["_pc_source"] = "local_csv"
+
+    # --- Sector normalization (idempotent)
+    SIFTED_SECTORS = {
+        "fintech": "Fintech",
+        "b2b saas": "B2B SaaS",
+        "saas": "B2B SaaS",
+        "software": "B2B SaaS",
+        "climate": "Climate",
+        "climate tech": "Climate",
+        "climatetech": "Climate",
+        "consumer": "Consumer",
+        "healthtech": "Healthtech",
+        "health tech": "Healthtech",
+        "medtech": "Healthtech",
+        "deeptech": "Deeptech",
+        "deep tech": "Deeptech",
+        "ai-native": "AI-native",
+        "ai native": "AI-native",
+        "ai": "AI-native",
+    }
+
+    def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFrame:
+        if df is None or df.empty or col not in df.columns:
+            return df
+        key = df[col].astype(str).str.strip().str.lower()
+        df[col] = key.map(SIFTED_SECTORS).fillna(df[col])
+        return df
+
+    cf = _normalize_sector_names(cf, "sector")
+    pc = _normalize_sector_names(pc, "sector")
+
+    # source string for UI
+    source = (cf["_source"].iloc[0] if ("_source" in cf.columns and not cf.empty) else "unknown")
+    return cf, pc, source
+
 # Standardize sector names to Sifted taxonomy
 SIFTED_SECTORS = {
     "fintech": "Fintech",
@@ -188,70 +264,92 @@ def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFra
 
 @st.cache_data
 def load_data():
-    # 1) Try live unified CSV first
-    cf_live = DATA_DIR / "crowdfunding_live.csv"
+    """
+    Return (cf, pc, source) with robust fallbacks and sector normalization.
+    - cf (crowdfunding) is loaded from Google Sheet (if set & valid) else local live CSV else sample.
+    - pc (public comps) is loaded from data/public_comps.csv or via load_public_comps() if present.
+    - source: string describing where cf came from.
+    """
+    from pathlib import Path
+    import pandas as pd
+
+    DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+    # --- 1) Crowdfunding (Google Sheet -> local live -> sample) ---
+    def _valid_cf(df: pd.DataFrame) -> bool:
+        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+            return False
+        cols = {c.strip().lower() for c in df.columns}
+        core = {"platform","source_url","startup","country","sector"}
+        return core.issubset(cols)
+
     cf = None
-    if cf_live.exists():
+    # Try existing helper if it exists
+    if 'load_crowdfunding' in globals():
         try:
-            cf_tmp = pd.read_csv(cf_live, parse_dates=["round_date"], dayfirst=False)
-            if len(cf_tmp) > 0:
-                cf = cf_tmp.copy()
-                cf["_source"] = "crowdfunding_live.csv"
-        except Exception as e:
-            st.warning(f"Could not read crowdfunding_live.csv ({e}). Will try remote/sample.")
+            cf = load_crowdfunding()
+        except Exception:
+            cf = None
 
-    # 2) If live is missing or empty, try Google Sheet secret
-    if cf is None:
-        cf_url = st.secrets.get("CROWD_CF_CSV_URL", None)
-        if cf_url:
-            try:
-                cf_tmp = pd.read_csv(cf_url, parse_dates=["round_date"])
-                if len(cf_tmp) > 0:
-                    cf = cf_tmp.copy()
-                    cf["_source"] = "remote"
-            except Exception as e:
-                st.warning(f"Could not load remote CF CSV ({e}). Will use sample.")
+    # If helper not present or returned empty, try local live CSV
+    if cf is None or not isinstance(cf, pd.DataFrame) or cf.empty or not _valid_cf(cf):
+        try:
+            cf = pd.read_csv(DATA_DIR / "crowdfunding_live.csv", parse_dates=["round_date"])
+            if not _valid_cf(cf):
+                cf = None
+            else:
+                cf["_source"] = "local_live_csv"
+        except Exception:
+            cf = None
 
-    # 3) Fallback to sample
+    # Fallback to sample
     if cf is None:
         cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
-        cf["_source"] = "sample"
+        cf["_source"] = "sample_csv"
 
-# ---------------------------------------------------------------
-# Load public comps + normalize sector names for consistency
-# ---------------------------------------------------------------
+    # --- 2) Public comps (local CSV or helper) ---
+    try:
+        if 'load_public_comps' in globals():
+            pc = load_public_comps()
+        else:
+            raise RuntimeError("no helper")
+        if pc is None or not isinstance(pc, pd.DataFrame) or pc.empty:
+            raise RuntimeError("empty")
+    except Exception:
+        pc = pd.read_csv(DATA_DIR / "public_comps.csv")
+        pc["_pc_source"] = "local_csv"
 
-pc = load_public_comps()
-
-SIFTED_SECTORS = {
-    "fintech": "Fintech",
-    "b2b saas": "B2B SaaS",
-    "saas": "B2B SaaS",
-    "software": "B2B SaaS",
-    "climate": "Climate",
-    "climate tech": "Climate",
-    "climatetech": "Climate",
-    "consumer": "Consumer",
-    "healthtech": "Healthtech",
-    "health tech": "Healthtech",
-    "medtech": "Healthtech",
-    "deeptech": "Deeptech",
-    "deep tech": "Deeptech",
-    "ai-native": "AI-native",
-    "ai native": "AI-native",
-    "ai": "AI-native",
-}
-
-def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFrame:
-    if df is None or df.empty or col not in df.columns:
+    # --- 3) Sector normalization for BOTH datasets ---
+    SIFTED_SECTORS = {
+        "fintech": "Fintech",
+        "b2b saas": "B2B SaaS",
+        "saas": "B2B SaaS",
+        "software": "B2B SaaS",
+        "climate": "Climate",
+        "climate tech": "Climate",
+        "climatetech": "Climate",
+        "consumer": "Consumer",
+        "healthtech": "Healthtech",
+        "health tech": "Healthtech",
+        "medtech": "Healthtech",
+        "deeptech": "Deeptech",
+        "deep tech": "Deeptech",
+        "ai-native": "AI-native",
+        "ai native": "AI-native",
+        "ai": "AI-native",
+    }
+    def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFrame:
+        if df is None or df.empty or col not in df.columns:
+            return df
+        key = df[col].astype(str).str.strip().str.lower()
+        df[col] = key.map(SIFTED_SECTORS).fillna(df[col])
         return df
-    key = df[col].astype(str).str.strip().str.lower()
-    df[col] = key.map(SIFTED_SECTORS).fillna(df[col])
-    return df
 
-# Apply to both datasets
-cf = _normalize_sector_names(cf, "sector")
-pc = _normalize_sector_names(pc, "sector")
+    cf = _normalize_sector_names(cf, "sector")
+    pc = _normalize_sector_names(pc, "sector")
+
+    source = (cf["_source"].iloc[0] if ("_source" in cf.columns and not cf.empty) else "unknown")
+    return cf, pc, source
 
 # Quick diagnostics in the sidebar
 with st.expander("Diagnostics: sector coverage", expanded=False):
