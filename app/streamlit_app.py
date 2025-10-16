@@ -3,7 +3,9 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 
-from src.public_comps import load_public_comps
+import sys, pathlib
+sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+from public_comps import load_public_comps
 
 # ---------- Unified loader that always returns (cf, pc, source) ----------
 from pathlib import Path
