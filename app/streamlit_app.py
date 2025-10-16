@@ -36,17 +36,18 @@ def load_cf_pc():
         cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
         cf["_source"] = "sample_csv"
 
-    # --- Public comps
-    pc = None
-    if 'load_public_comps' in globals():
-        try:
-            pc = load_public_comps()
-        except Exception:
-            pc = None
-    if pc is None or not isinstance(pc, pd.DataFrame) or pc.empty:
-from src.public_comps import load_public_comps
-	pc = load_public_comps()
-        pc["_pc_source"] = "local_csv"
+# --- Public comps
+pc = None
+if 'load_public_comps' in globals():
+    try:
+        pc = load_public_comps()
+    except Exception:
+        pc = None
+
+if pc is None or not isinstance(pc, pd.DataFrame) or pc.empty:
+    from src.public_comps import load_public_comps
+    pc = load_public_comps()
+    pc["_pc_source"] = "local_csv"
 
     # --- Sector normalization (idempotent)
     SIFTED_SECTORS = {
