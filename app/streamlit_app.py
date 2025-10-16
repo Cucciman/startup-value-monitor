@@ -93,29 +93,26 @@ def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFra
 
 @st.cache_data
 def load_data():
-    # Optional: live CSV URL (e.g., Google Sheets → File > Share > Publish to the web > CSV)
-    cf_url = st.secrets.get("CROWD_CF_CSV_URL", None)
-
-    # Base crowdfunding from URL or local file
-    if cf_url:
-        try:
-            cf = pd.read_csv(cf_url, parse_dates=["round_date"])
-            cf["_source"] = "remote"
-        except Exception as e:
-            st.warning(f"Could not load remote CF CSV ({e}). Falling back to local file.")
+    cf_live = DATA_DIR / "crowdfunding_live.csv"
+    if cf_live.exists():
+        cf = pd.read_csv(cf_live, parse_dates=["round_date"], dayfirst=False)
+        cf["_source"] = "crowdfunding_live.csv"
+    else:
+        # Optional Google Sheets CSV via secret
+        cf_url = st.secrets.get("CROWD_CF_CSV_URL", None)
+        if cf_url:
+            try:
+                cf = pd.read_csv(cf_url, parse_dates=["round_date"])
+                cf["_source"] = "remote"
+            except Exception as e:
+                st.warning(f"Could not load remote CF CSV ({e}). Falling back to sample.")
+                cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
+                cf["_source"] = "sample"
+        else:
             cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
             cf["_source"] = "sample"
-    else:
-        cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
-        cf["_source"] = "sample"
 
-    # Normalize sectors and ensure optional cols exist for the estimator
-    cf = _normalize_sector_names(cf)
-    for c in ["arr_eur", "mrr_eur", "gmv_eur", "assumed_take_rate_pct", "headcount"]:
-        if c not in cf.columns:
-            cf[c] = pd.NA
-
-    # Public comps (prefer live file, fallback to sample)
+    # Public comps (unchanged)
     primary = DATA_DIR / "public_comps.csv"
     fallback = DATA_DIR / "public_comps_sample.csv"
     if primary.exists():
@@ -125,10 +122,9 @@ def load_data():
         pc = pd.read_csv(fallback)
         src = "public_comps_sample.csv (sample)"
 
-    pc = _normalize_sector_names(pc)
-    for col in ["ev_to_revenue", "ev_rev_method", "sector", "ticker"]:
-        if col not in pc.columns:
-            pc[col] = pd.NA
+    # If you use a sector normalizer function, call it here
+    if "sector" in cf.columns:
+        cf["sector"] = cf["sector"].astype(str).str.strip()
 
     return cf, pc, src
 
