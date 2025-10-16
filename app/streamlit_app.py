@@ -79,6 +79,8 @@ if pc is None or not isinstance(pc, pd.DataFrame) or pc.empty:
     cf = _normalize_sector_names(cf, "sector")
     pc = _normalize_sector_names(pc, "sector")
 
+def load_data():
+    ...
     # source string for UI
     source = (cf["_source"].iloc[0] if ("_source" in cf.columns and not cf.empty) else "unknown")
     return cf, pc, source
