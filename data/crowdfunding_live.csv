@@ -1,1 +1,4 @@
-headcount,revenue_last_fy_eur,assumed_take_rate_pct,mrr_eur,source_url,valuation_pre_money_eur,country,amount_raised_eur,startup,gmv_eur,arr_eur,platform,round_date,sector,confidence,rev_source,source
+platform,source_url,startup,country,sector,valuation_pre_money_eur,amount_raised_eur,round_date,revenue_last_fy_eur,arr_eur,mrr_eur,gmv_eur,assumed_take_rate_pct,headcount,rev_source,confidence
+Crowdcube,https://www.crowdcube.com/companies/olio/pitches/bnq1k0,Olio,UK,Climate,9000000,600000,2025-10-01,,,,,,,platform page,Low
+Seedrs,https://www.seedrs.com/oddbox,Oddbox,UK,Consumer,7000000,350000,2025-08-10,,,,,,,platform page,Low
+Crowdcube,https://www.crowdcube.com/companies/finexos/pitches/bnq1k0,Finexos,UK,Fintech,12000000,800000,2025-09-15,,,,,,,platform page,Low
