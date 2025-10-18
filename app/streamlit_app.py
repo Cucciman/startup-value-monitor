@@ -1,877 +1,512 @@
-import pathlib
+# app/streamlit_app.py
+# Clean MVP — Startup Value Monitor (VGI)
+# - Loads crowdfunding from Google Sheet (secrets) -> local CSV -> sample
+# - Loads public comps from BME Growth (secrets) -> local CSV -> sample
+# - Normalizes sectors (Sifted-style)
+# - Computes VGI = (CF EV/Rev) / (Public median EV/Rev per sector)
+# - Charts + sector table; diagnostics moved to bottom
+
+from pathlib import Path
+from datetime import datetime
+import math
+
 import pandas as pd
 import altair as alt
 import streamlit as st
 
-import sys, pathlib
-sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent / "src"))
-
-# --- Portable loader for src/public_comps.py (works locally & on Streamlit Cloud)
-import importlib.util, pathlib, sys
-APP_DIR = pathlib.Path(__file__).resolve().parent          # /app
-ROOT_DIR = APP_DIR.parent                                  # project root
-PUBLIC_COMPS_PATH = ROOT_DIR / "src" / "public_comps.py"
-
-def _load_public_comps_func():
-    if PUBLIC_COMPS_PATH.exists():
-        spec = importlib.util.spec_from_file_location("public_comps", str(PUBLIC_COMPS_PATH))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore
-        return getattr(mod, "load_public_comps", None)
-    return None
-
-load_public_comps = _load_public_comps_func()
-
-# Fallback: if module couldn't be imported, keep the app alive using local CSV
-if load_public_comps is None:
-    import pandas as pd
-    def load_public_comps():
-        p = ROOT_DIR / "data" / "public_comps.csv"
-        df = pd.read_csv(p) if p.exists() else pd.DataFrame()
-        if not df.empty and "_pc_source" not in df.columns:
-            df["_pc_source"] = "local_public_csv"
-        return df
-
-# ---------- Unified loader that always returns (cf, pc, source) ----------
-# ---------- Crowdfunding data loader with validation & clear reasons ----------
-from pathlib import Path
-import pandas as pd
+# ------------------------------- Paths & Constants -------------------------------
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
-# Minimal required columns (make source_url optional to avoid blocking)
-_REQUIRED_CORE = {"startup", "country", "sector", "platform", "round_date", "valuation_pre_money_eur"}
-
-def _valid_cf(df: pd.DataFrame) -> tuple[bool, str]:
-    if not isinstance(df, pd.DataFrame) or df is None or df.empty:
-        return False, "empty dataframe"
-    cols = {c.strip().lower() for c in df.columns}
-    missing = _REQUIRED_CORE - cols
-    if missing:
-        return False, f"missing required columns: {sorted(missing)}"
-    return True, "ok"
-
-def load_crowdfunding() -> pd.DataFrame:
-    """Load CF with strict preference and show why a source was rejected:
-       1) Google Sheet (st.secrets['GOOGLE_SHEET_CSV'])
-       2) data/crowdfunding_live.csv
-       3) data/crowdfunding_sample.csv
-    """
-    # 1) Google Sheet (if configured)
-    sheet_url = ""
-    try:
-        import streamlit as st
-        sheet_url = (st.secrets.get("GOOGLE_SHEET_CSV") or "").strip()
-    except Exception:
-        sheet_url = ""
-    if sheet_url:
-        try:
-            df = pd.read_csv(sheet_url)
-            ok, reason = _valid_cf(df)
-            if ok:
-                df["_source"] = "google_sheet_csv"
-                return df
-            else:
-                try:
-                    import streamlit as st
-                    st.info(f"Google Sheet loaded but rejected: {reason} — falling back.")
-                except Exception:
-                    pass
-        except Exception as e:
-            try:
-                import streamlit as st
-                st.info(f"Could not load Google Sheet ({e}) — falling back.")
-            except Exception:
-                pass
-
-    # 2) Local live CSV
-    live_path = DATA_DIR / "crowdfunding_live.csv"
-    if live_path.exists():
-        try:
-            df = pd.read_csv(live_path)
-            ok, reason = _valid_cf(df)
-            if ok:
-                df["_source"] = "local_live_csv"
-                return df
-            else:
-                try:
-                    import streamlit as st
-                    st.info(f"Local live CSV exists but rejected: {reason} — falling back.")
-                except Exception:
-                    pass
-        except Exception as e:
-            try:
-                import streamlit as st
-                st.info(f"Could not read local live CSV ({e}) — falling back.")
-            except Exception:
-                pass
-
-    # 3) Sample CSV
-    sample_path = DATA_DIR / "crowdfunding_sample.csv"
-    try:
-        df = pd.read_csv(sample_path)
-        df["_source"] = "sample_csv"
-        return df
-    except Exception as e:
-        try:
-            import streamlit as st
-            st.error(f"Failed to load crowdfunding data from all sources ({e}).")
-        except Exception:
-            pass
-        return pd.DataFrame()
-
-def load_cf_pc():
-    """Return (cf, pc, source) with robust fallbacks and sector normalization."""
-
-    # --- Crowdfunding (use helper) ---
-    cf = load_crowdfunding()
-    source = (cf["_source"].iloc[0] if ("_source" in cf.columns and not cf.empty) else "unknown")
-
-# --- Public comps
-pc = None
-if 'load_public_comps' in globals():
-    try:
-        pc = load_public_comps()
-    except Exception:
-        pc = None
-
-if pc is None or not isinstance(pc, pd.DataFrame) or pc.empty:
-    pc = load_public_comps()
-    pc["_pc_source"] = "local_csv"
-
-    # --- Sector normalization (idempotent)
-    SIFTED_SECTORS = {
-        "fintech": "Fintech",
-        "b2b saas": "B2B SaaS",
-        "saas": "B2B SaaS",
-        "software": "B2B SaaS",
-        "climate": "Climate",
-        "climate tech": "Climate",
-        "climatetech": "Climate",
-        "consumer": "Consumer",
-        "healthtech": "Healthtech",
-        "health tech": "Healthtech",
-        "medtech": "Healthtech",
-        "deeptech": "Deeptech",
-        "deep tech": "Deeptech",
-        "ai-native": "AI-native",
-        "ai native": "AI-native",
-        "ai": "AI-native",
-    }
-
-    def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFrame:
-        if df is None or df.empty or col not in df.columns:
-            return df
-        key = df[col].astype(str).str.strip().str.lower()
-        df[col] = key.map(SIFTED_SECTORS).fillna(df[col])
-        return df
-
-    cf = _normalize_sector_names(cf, "sector")
-    pc = _normalize_sector_names(pc, "sector")
-
-def load_data():
-    ...
-    # source string for UI
-    source = (cf["_source"].iloc[0] if ("_source" in cf.columns and not cf.empty) else "unknown")
-    return cf, pc, source
-
-# Standardize sector names to Sifted taxonomy
+# Sifted-style sector taxonomy normalization
 SIFTED_SECTORS = {
     "fintech": "Fintech",
+    "payments": "Fintech",
+    "insurtech": "Fintech",
     "b2b saas": "B2B SaaS",
     "saas": "B2B SaaS",
     "software": "B2B SaaS",
     "climate": "Climate",
     "climate tech": "Climate",
     "climatetech": "Climate",
+    "clean tech": "Climate",
+    "cleantech": "Climate",
     "consumer": "Consumer",
+    "health": "Healthtech",
     "healthtech": "Healthtech",
     "health tech": "Healthtech",
     "medtech": "Healthtech",
     "deeptech": "Deeptech",
     "deep tech": "Deeptech",
+    "semiconductors": "Deeptech",
+    "aerospace": "Deeptech",
     "ai-native": "AI-native",
     "ai native": "AI-native",
     "ai": "AI-native",
 }
 
-def _normalize_sector_names(df, col="sector"):
-    """Normalize sector names according to the Sifted taxonomy."""
-    if col not in df.columns:
-        return df
-    s = df[col].astype(str).str.strip()
-    key = s.str.lower()
-    df[col] = key.map(SIFTED_SECTORS).fillna(df[col])
-    return df
-
-# ---------- Crowdfunding data loader with robust validation, fallbacks, and diagnostics ----------
-from pathlib import Path
-import pandas as pd
-import streamlit as st
-
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-
-def load_public_comps() -> pd.DataFrame:
-    """Load data/public_comps.csv and validate minimal columns."""
-    path = DATA_DIR / "public_comps.csv"
-    try:
-        df = pd.read_csv(path)
-    except Exception as e:
-        st.error(f"Failed to load public comps: {e}")
-        return pd.DataFrame()
-
-    # Minimal columns we need
-    needed = {"sector", "ev_to_revenue"}
-    if not needed.issubset({c.strip().lower() for c in df.columns}):
-        st.warning("public_comps.csv missing required columns (needs sector and ev_to_revenue).")
-    df["_pc_source"] = "local_csv"
-    return df
-
-_REQUIRED_COLS = {
-    "platform","source_url","startup","country","sector",
-    "valuation_pre_money_eur","amount_raised_eur","round_date",
-    # optional but part of our schema:
-    "revenue_last_fy_eur","arr_eur","mrr_eur","gmv_eur","assumed_take_rate_pct","headcount",
-    "rev_source","confidence"
+# Minimal CF columns to accept a Sheet/CSV (source_url is optional to avoid blocking)
+CF_REQUIRED_CORE = {
+    "startup", "country", "sector", "platform", "round_date", "valuation_pre_money_eur"
 }
 
-def _valid_cf(df: pd.DataFrame) -> bool:
-    """Basic schema sanity: must be a DF, non-empty, and include core columns."""
-    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        return False
-    cols = {c.strip().lower() for c in df.columns}
-    core = {"platform","source_url","startup","country","sector"}
-    return core.issubset(cols)
+CF_NUMERIC = [
+    "valuation_pre_money_eur", "amount_raised_eur", "revenue_last_fy_eur",
+    "arr_eur", "mrr_eur", "gmv_eur", "assumed_take_rate_pct", "headcount"
+]
 
-def load_crowdfunding() -> pd.DataFrame:
+PC_EXPECTED_ANY = {
+    # at least one id
+    "ticker", "symbol", "isin",
+    # sector-ish
+    "sector", "industry", "vertical",
+    # value/revenue fields
+    "enterprise_value", "market_cap",
+    "revenue_ttm", "revenue_total",
+    # optional method column
+    "ev_rev_method"
+}
+
+
+# ------------------------------- Small Helpers -------------------------------
+
+def _norm_sector(s: pd.Series) -> pd.Series:
+    if s is None:
+        return s
+    key = s.astype(str).str.strip().str.lower()
+    return key.map(SIFTED_SECTORS).fillna(s.astype(str).str.strip())
+
+
+def _to_numeric(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def _has_cols(df: pd.DataFrame, required: set[str]) -> tuple[bool, set[str]]:
+    cols = {c.strip().lower() for c in df.columns}
+    miss = {c for c in required if c not in cols}
+    return (len(miss) == 0), miss
+
+
+# ------------------------------- Crowdfunding Loader -------------------------------
+
+def load_crowdfunding() -> tuple[pd.DataFrame, str, list[str]]:
+    """Load CF with strict preference and expose clear rejection reasons.
+       Order: Google Sheet (secrets) -> data/crowdfunding_live.csv -> data/crowdfunding_sample.csv
+       Returns: (df, source_label, notes[])
     """
-    Load crowdfunding data with strict, validated fallback order:
-      1) Google Sheet (if GOOGLE_SHEET_CSV secret set) AND passes _valid_cf
-      2) Local live CSV (data/crowdfunding_live.csv) if passes _valid_cf
-      3) Sample CSV (data/crowdfunding_sample.csv)
-    """
-    # 1) Google Sheet
+    notes: list[str] = []
+
+    # 1) Google Sheet CSV from secrets
     sheet_url = ""
     try:
         sheet_url = (st.secrets.get("GOOGLE_SHEET_CSV") or "").strip()
     except Exception:
         sheet_url = ""
+
     if sheet_url:
         try:
             df = pd.read_csv(sheet_url)
-            if _valid_cf(df):
-                df["_source"] = "google_sheet"
-                return df
+            ok, miss = _has_cols(df, CF_REQUIRED_CORE)
+            if not ok:
+                notes.append(f"Sheet rejected: missing required columns: {sorted(miss)}")
             else:
-                st.info("Google Sheet loaded but missing required columns — falling back.")
+                df["_source"] = "google_sheet_csv"
+                # parse & normalize
+                if "round_date" in df.columns:
+                    df["round_date"] = pd.to_datetime(df["round_date"], errors="coerce")
+                df["sector"] = _norm_sector(df.get("sector"))
+                df = _to_numeric(df, CF_NUMERIC)
+                return df, "google_sheet_csv", notes
         except Exception as e:
-            st.info(f"Could not load Google Sheet ({e}) — falling back.")
+            notes.append(f"Sheet load error: {e!s}")
 
     # 2) Local live CSV
-    live_path = DATA_DIR / "crowdfunding_live.csv"
-    if live_path.exists():
+    live = DATA_DIR / "crowdfunding_live.csv"
+    if live.exists():
         try:
-            df = pd.read_csv(live_path)
-            if _valid_cf(df):
+            df = pd.read_csv(live)
+            ok, miss = _has_cols(df, CF_REQUIRED_CORE)
+            if not ok:
+                notes.append(f"Local live CSV rejected: missing columns: {sorted(miss)}")
+            else:
                 df["_source"] = "local_live_csv"
-                return df
-            else:
-                st.info("Local live CSV exists but missing required columns — falling back.")
+                if "round_date" in df.columns:
+                    df["round_date"] = pd.to_datetime(df["round_date"], errors="coerce")
+                df["sector"] = _norm_sector(df.get("sector"))
+                df = _to_numeric(df, CF_NUMERIC)
+                return df, "local_live_csv", notes
         except Exception as e:
-            st.info(f"Could not read local live CSV ({e}) — falling back.")
+            notes.append(f"Local live CSV error: {e!s}")
 
-    # 3) Sample CSV
-    sample_path = DATA_DIR / "crowdfunding_sample.csv"
-    try:
-        df = pd.read_csv(sample_path)
-        df["_source"] = "sample_csv"
-        return df
-    except Exception as e:
-        st.error(f"Failed to load crowdfunding data from all sources ({e}).")
-        return pd.DataFrame()
+    # 3) Sample
+    sample = DATA_DIR / "crowdfunding_sample.csv"
+    df = pd.read_csv(sample)
+    df["_source"] = "sample_csv"
+    if "round_date" in df.columns:
+        df["round_date"] = pd.to_datetime(df["round_date"], errors="coerce")
+    df["sector"] = _norm_sector(df.get("sector"))
+    df = _to_numeric(df, CF_NUMERIC)
+    return df, "sample_csv", notes
 
 
-# ---------------------------- Sector normalization ----------------------------
+# ------------------------------- Public Comps Loader -------------------------------
 
-def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFrame:
-    """
-    Map assorted sector labels into a canonical taxonomy aligned to:
-    {Fintech, B2B SaaS, Climate, Deeptech, Healthtech, Consumer, AI-native}
-    """
-    if col not in df.columns:
-        return df
-    raw = (
-        df[col].astype(str)
-        .str.strip()
-        .str.replace(r"\s+", " ", regex=True)
-    )
-    mapping = {
-        # SaaS
-        "saas": "B2B SaaS", "SaaS": "B2B SaaS", "SaAS": "B2B SaaS",
-        "software": "B2B SaaS", "enterprise software": "B2B SaaS",
-        # Climate
-        "climate": "Climate", "Climate Tech": "Climate",
-        "climatetech": "Climate", "greentech": "Climate",
-        "cleantech": "Climate", "energy": "Climate", "renewables": "Climate",
-        # Fintech
-        "fintech": "Fintech", "FinTech": "Fintech", "Fin tech": "Fintech", "payments": "Fintech",
-        # Deeptech
-        "deeptech": "Deeptech", "DeepTech": "Deeptech", "Deep tech": "Deeptech",
-        "semiconductors": "Deeptech", "robotics": "Deeptech", "space": "Deeptech",
-        # Healthtech
-        "healthtech": "Healthtech", "HealthTech": "Healthtech", "digital health": "Healthtech",
-        "medtech": "Healthtech", "biotech": "Healthtech",
-        # Consumer
-        "consumer": "Consumer", "ConsumerTech": "Consumer", "ecommerce": "Consumer",
-        "marketplace": "Consumer", "D2C": "Consumer",
-        # AI-native
-        "ai": "AI-native", "AI": "AI-native", "AI native": "AI-native",
-        "GenAI": "AI-native", "machine learning": "AI-native",
-    }
-    normalized = raw.replace(mapping)
+def _coalesce_pc_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Map arbitrary column names to a common set: ticker, sector, country, ev_to_revenue, ev_rev_method."""
+    cols = {c.lower(): c for c in df.columns}
 
-    def infer(v: str) -> str:
-        s = v.lower()
-        if "fintech" in s or "payment" in s or "bank" in s: return "Fintech"
-        if "saas" in s or "software" in s or "b2b" in s: return "B2B SaaS"
-        if any(k in s for k in ["climate", "green", "clean", "energy", "renew"]): return "Climate"
-        if any(k in s for k in ["deep", "semicon", "robot", "space", "quantum"]): return "Deeptech"
-        if any(k in s for k in ["health", "med", "bio"]): return "Healthtech"
-        if any(k in s for k in ["consumer", "ecom", "marketplace"]): return "Consumer"
-        if any(k in s for k in ["ai", "genai", "ml", "artificial intelligence"]): return "AI-native"
-        return v
+    def pick(*cands):
+        for c in cands:
+            if c in cols:
+                return cols[c]
+        return None
 
-    normalized = normalized.apply(infer)
-    allowed = {"Fintech", "B2B SaaS", "Climate", "Deeptech", "Healthtech", "Consumer", "AI-native"}
-    df[col] = normalized.where(normalized.isin(allowed), normalized)
-    return df
-
-# ---------------------------- Data loading ------------------------------------
-
-@st.cache_data
-def load_data():
-    """
-    Return (cf, pc, source) with robust fallbacks and sector normalization.
-    - cf (crowdfunding) is loaded from Google Sheet (if set & valid) else local live CSV else sample.
-    - pc (public comps) is loaded from data/public_comps.csv or via load_public_comps() if present.
-    - source: string describing where cf came from.
-    """
-    from pathlib import Path
-    import pandas as pd
-
-    DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-
-    # --- 1) Crowdfunding (Google Sheet -> local live -> sample) ---
-    def _valid_cf(df: pd.DataFrame) -> bool:
-        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-            return False
-        cols = {c.strip().lower() for c in df.columns}
-        core = {"platform","source_url","startup","country","sector"}
-        return core.issubset(cols)
-
-    cf = None
-    # Try existing helper if it exists
-    if 'load_crowdfunding' in globals():
-        try:
-            cf = load_crowdfunding()
-        except Exception:
-            cf = None
-
-    # If helper not present or returned empty, try local live CSV
-    if cf is None or not isinstance(cf, pd.DataFrame) or cf.empty or not _valid_cf(cf):
-        try:
-            cf = pd.read_csv(DATA_DIR / "crowdfunding_live.csv", parse_dates=["round_date"])
-            if not _valid_cf(cf):
-                cf = None
-            else:
-                cf["_source"] = "local_live_csv"
-        except Exception:
-            cf = None
-
-    # Fallback to sample
-    if cf is None:
-        cf = pd.read_csv(DATA_DIR / "crowdfunding_sample.csv", parse_dates=["round_date"])
-        cf["_source"] = "sample_csv"
-
-    # --- 2) Public comps (local CSV or helper) ---
-    try:
-        if 'load_public_comps' in globals():
-            pc = load_public_comps()
-        else:
-            raise RuntimeError("no helper")
-        if pc is None or not isinstance(pc, pd.DataFrame) or pc.empty:
-            raise RuntimeError("empty")
-    except Exception:
-        pc = pd.read_csv(DATA_DIR / "public_comps.csv")
-        pc["_pc_source"] = "local_csv"
-
-    # --- 3) Sector normalization for BOTH datasets ---
-    SIFTED_SECTORS = {
-        "fintech": "Fintech",
-        "b2b saas": "B2B SaaS",
-        "saas": "B2B SaaS",
-        "software": "B2B SaaS",
-        "climate": "Climate",
-        "climate tech": "Climate",
-        "climatetech": "Climate",
-        "consumer": "Consumer",
-        "healthtech": "Healthtech",
-        "health tech": "Healthtech",
-        "medtech": "Healthtech",
-        "deeptech": "Deeptech",
-        "deep tech": "Deeptech",
-        "ai-native": "AI-native",
-        "ai native": "AI-native",
-        "ai": "AI-native",
-    }
-    def _normalize_sector_names(df: pd.DataFrame, col: str = "sector") -> pd.DataFrame:
-        if df is None or df.empty or col not in df.columns:
-            return df
-        key = df[col].astype(str).str.strip().str.lower()
-        df[col] = key.map(SIFTED_SECTORS).fillna(df[col])
-        return df
-
-    cf = _normalize_sector_names(cf, "sector")
-    pc = _normalize_sector_names(pc, "sector")
-
-    source = (cf["_source"].iloc[0] if ("_source" in cf.columns and not cf.empty) else "unknown")
-    return cf, pc, source
-
-# Quick diagnostics in the sidebar
-
-    # Public comps (unchanged)
-    primary = DATA_DIR / "public_comps.csv"
-    fallback = DATA_DIR / "public_comps_sample.csv"
-    if primary.exists():
-        pc = pd.read_csv(primary)
-        src = "public_comps.csv (live)"
+    out = pd.DataFrame(index=df.index)
+    # id
+    out["ticker"] = df.get(pick("ticker", "symbol", "isin"))
+    # sector
+    sector_col = pick("sector", "industry", "vertical")
+    if sector_col:
+        out["sector"] = df[sector_col]
     else:
-        pc = pd.read_csv(fallback)
-        src = "public_comps_sample.csv (sample)"
+        out["sector"] = pd.NA
+    # country
+    out["country"] = df.get(pick("country", "listing_country", "hq_country"))
+    # enterprise/revenue
+    ev = df.get(pick("enterprise_value"))
+    mcap = df.get(pick("market_cap"))
+    rev_ttm = df.get(pick("revenue_ttm"))
+    rev_total = df.get(pick("revenue_total"))
 
-    # Light normalization
-    if "sector" in cf.columns:
-        cf["sector"] = cf["sector"].astype(str).str.strip()
+    ev_to_rev = pd.Series(pd.NA, index=df.index, dtype="Float64")
+    method = pd.Series(pd.NA, index=df.index, dtype="string")
 
-def load_crowdfunding():
-    ...
-    return cf, pc, src
+    # 1) EV / total revenue
+    if ev is not None and rev_total is not None:
+        num = pd.to_numeric(ev, errors="coerce")
+        den = pd.to_numeric(rev_total, errors="coerce")
+        ratio = num / den
+        mask = den > 0
+        ev_to_rev[mask] = ratio[mask]
+        method[mask] = "EV/TotalRevenue"
 
-# -------- Consistent method per sector (EV/TotalRevenue vs MktCap/TTMRevenue) --
+    # 2) MarketCap / TTM revenue (fallback where EV/Total missing)
+    if mcap is not None and rev_ttm is not None:
+        num = pd.to_numeric(mcap, errors="coerce")
+        den = pd.to_numeric(rev_ttm, errors="coerce")
+        ratio = num / den
+        # only fill where still NA
+        fill_mask = ev_to_rev.isna() & (den > 0)
+        ev_to_rev[fill_mask] = ratio[fill_mask]
+        method[fill_mask] = "MktCap/TTMRevenue"
 
-def sector_public_median_by_consistent_method(pc: pd.DataFrame, min_n: int = 1) -> pd.DataFrame:
-    """
-    For each sector, choose ONE method (EV/TotalRevenue or MktCap/TTMRevenue)
-    based on coverage (>= min_n). Return median + method used + n.
-    MVP uses min_n=1 so sectors render even with limited comps.
-    """
-    df = pc.copy()
-    df["ev_to_revenue"] = pd.to_numeric(df["ev_to_revenue"], errors="coerce")
-    # Count valid comps per sector/method
-    counts = (
-        df.dropna(subset=["ev_to_revenue", "ev_rev_method"])
-          .groupby(["sector", "ev_rev_method"])["ticker"]
-          .count()
-          .reset_index(name="n")
-    )
-
-    rows = []
-    for sector in sorted(df["sector"].dropna().unique()):
-        method_used = None
-        n_used = 0
-        # Prefer EV/TotalRevenue; else MktCap/TTMRevenue
-        c1 = counts[(counts["sector"] == sector) & (counts["ev_rev_method"] == "EV/TotalRevenue")]
-        if not c1.empty and int(c1["n"].iloc[0]) >= min_n:
-            method_used = "EV/TotalRevenue"; n_used = int(c1["n"].iloc[0])
-        else:
-            c2 = counts[(counts["sector"] == sector) & (counts["ev_rev_method"] == "MktCap/TTMRevenue")]
-            if not c2.empty and int(c2["n"].iloc[0]) >= min_n:
-                method_used = "MktCap/TTMRevenue"; n_used = int(c2["n"].iloc[0])
-
-        if method_used is not None:
-            med = (
-                df[(df["sector"] == sector) & (df["ev_rev_method"] == method_used)]
-                  .dropna(subset=["ev_to_revenue"])["ev_to_revenue"]
-                  .median()
-            )
-            rows.append({
-                "sector": sector,
-                "public_median_ev_rev": med,
-                "public_method_used": method_used,
-                "public_n_used": n_used,
-            })
-        else:
-            rows.append({
-                "sector": sector,
-                "public_median_ev_rev": None,
-                "public_method_used": "insufficient",
-                "public_n_used": 0,
-            })
-    return pd.DataFrame(rows)
-
-# ---------------------------- Aggregations ------------------------------------
-
-def sector_summary(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
-    """
-    Build sector-level CF medians using estimated revenue so VGI is available
-    even when audited revenue is missing.
-    """
-    # Ensure expected numeric columns exist
-    cf2 = cf.copy()
-    for c in ["valuation_pre_money_eur", "amount_raised_eur", "revenue_last_fy_eur"]:
-        if c not in cf2.columns:
-            cf2[c] = pd.NA
-        cf2[c] = pd.to_numeric(cf2[c], errors="coerce")
-
-    # Use the same estimator we use per-startup
-    cf_est = estimate_revenue(cf2)
-    # Prefer estimated revenue for sector-level median
-    cf_est["revenue_for_sector"] = pd.to_numeric(cf_est.get("estimated_revenue_eur"), errors="coerce")
-
-    # Sector aggregates (median pre-money, sum raised, median revenue (estimated))
-    cf_sect = (
-        cf_est.groupby("sector", as_index=False)
-              .agg(
-                  cf_median_pre_money=("valuation_pre_money_eur", "median"),
-                  cf_total_raised=("amount_raised_eur", "sum"),
-                  cf_median_revenue=("revenue_for_sector", "median"),
-              )
-    )
-
-    # Merge with public comps median (consistent method)
-    pc_med = sector_public_median_by_consistent_method(pc, min_n=1)  # MVP coverage
-    return cf_sect.merge(pc_med, on="sector", how="left")
-
-def compute_vgi(df: pd.DataFrame) -> pd.DataFrame:
-    """Sector-level VGI = (CF EV/Rev) / (Public EV/Rev)."""
-    out = df.copy()
-    out["cf_ev_rev"] = pd.to_numeric(out.get("cf_median_pre_money"), errors="coerce") / pd.to_numeric(
-        out.get("cf_median_revenue"), errors="coerce"
-    )
-    out["VGI"] = out["cf_ev_rev"] / pd.to_numeric(out.get("public_median_ev_rev"), errors="coerce")
-    out.replace([float("inf"), -float("inf")], pd.NA, inplace=True)
+    out["ev_to_revenue"] = ev_to_rev
+    # prefer explicit ev_rev_method column if present
+    method_col = pick("ev_rev_method")
+    out["ev_rev_method"] = df.get(method_col, method)
     return out
+
+
+def load_public_comps() -> tuple[pd.DataFrame, str, list[str]]:
+    """Load public comps with flexible column mapping.
+       Order: BME Growth CSV (secrets) -> data/public_comps.csv -> data/public_comps_sample.csv
+       Returns: (df, source_label, notes[])
+    """
+    notes: list[str] = []
+
+    # 1) BME Growth CSV from secrets
+    bme_url = ""
+    try:
+        bme_url = (st.secrets.get("BME_GROWTH_CSV_URL") or "").strip()
+    except Exception:
+        bme_url = ""
+
+    if bme_url:
+        try:
+            raw = pd.read_csv(bme_url)
+            if raw.empty:
+                notes.append("BME CSV loaded but has 0 rows")
+            else:
+                df = _coalesce_pc_cols(raw)
+                df["_pc_source"] = "bme_growth_csv"
+                df["sector"] = _norm_sector(df.get("sector"))
+                return df, "bme_growth_csv", notes
+        except Exception as e:
+            notes.append(f"BME CSV load error: {e!s}")
+
+    # 2) Local public_comps.csv
+    local = DATA_DIR / "public_comps.csv"
+    if local.exists():
+        try:
+            raw = pd.read_csv(local)
+            if raw.empty:
+                notes.append("local public_comps.csv exists but is empty")
+            else:
+                df = _coalesce_pc_cols(raw)
+                df["_pc_source"] = "local_csv"
+                df["sector"] = _norm_sector(df.get("sector"))
+                return df, "local_csv", notes
+        except Exception as e:
+            notes.append(f"local public_comps.csv error: {e!s}")
+
+    # 3) Sample public comps
+    sample = DATA_DIR / "public_comps_sample.csv"
+    if sample.exists():
+        raw = pd.read_csv(sample)
+    else:
+        # fallback to the original default if sample not available
+        raw = pd.read_csv(DATA_DIR / "public_comps.csv")
+    df = _coalesce_pc_cols(raw)
+    df["_pc_source"] = "sample_csv"
+    df["sector"] = _norm_sector(df.get("sector"))
+    return df, "sample_csv", notes
+
+
+# ------------------------------- VGI Computation -------------------------------
 
 def estimate_revenue(cf: pd.DataFrame) -> pd.DataFrame:
-    """
-    Create estimated_revenue_eur, rev_source, confidence
-    from available columns: revenue_last_fy_eur, arr_eur, mrr_eur, gmv_eur,
-    assumed_take_rate_pct, headcount.
-    """
+    """Create estimated_revenue_eur, rev_source, confidence (deterministic + transparent)."""
     df = cf.copy()
-    est = pd.Series(pd.NA, index=df.index, dtype="Float64")  # nullable float
-    src = pd.Series(pd.NA, index=df.index, dtype="string")   # pandas string dtype
-    conf = pd.Series(pd.NA, index=df.index, dtype="string")  # pandas string dtype
-
-    # Ensure optional cols exist
-    for c in ["arr_eur", "mrr_eur", "gmv_eur", "assumed_take_rate_pct", "headcount"]:
+    for c in ["arr_eur", "mrr_eur", "gmv_eur", "assumed_take_rate_pct", "revenue_last_fy_eur"]:
         if c not in df.columns:
             df[c] = pd.NA
+    _to_numeric(df, ["arr_eur", "mrr_eur", "gmv_eur", "assumed_take_rate_pct", "revenue_last_fy_eur"])
 
-    # Normalize numerics
-    num_cols = ["revenue_last_fy_eur", "arr_eur", "mrr_eur", "gmv_eur", "assumed_take_rate_pct", "headcount"]
-    for c in num_cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+    est = pd.Series(pd.NA, index=df.index, dtype="Float64")
+    src = pd.Series(pd.NA, index=df.index, dtype="string")
+    conf = pd.Series(pd.NA, index=df.index, dtype="string")
 
-    # 1) Audited/last FY revenue
-    mask = df["revenue_last_fy_eur"].notna() & (df["revenue_last_fy_eur"] > 0)
-    est[mask] = df.loc[mask, "revenue_last_fy_eur"]
-    src[mask] = "audited_revenue"
-    conf[mask] = "High"
+    # 1) Audited/declared revenue (high)
+    m = df["revenue_last_fy_eur"].notna() & (df["revenue_last_fy_eur"] > 0)
+    est[m] = df.loc[m, "revenue_last_fy_eur"]
+    src[m] = "audited_revenue"
+    conf[m] = "High"
 
-    # 2) ARR
-    mask = est.isna() & df["arr_eur"].notna() & (df["arr_eur"] > 0)
-    est[mask] = df.loc[mask, "arr_eur"]
-    src[mask] = "ARR"
-    conf[mask] = "Medium-High"
+    # 2) ARR (medium) — ARR ~ annual revenue proxy
+    if "arr_eur" in df.columns:
+        m = est.isna() & df["arr_eur"].notna() & (df["arr_eur"] > 0)
+        est[m] = df.loc[m, "arr_eur"]
+        src[m] = "arr"
+        conf[m] = "Medium"
 
-    # 3) MRR x 12
-    mask = est.isna() & df["mrr_eur"].notna() & (df["mrr_eur"] > 0)
-    est[mask] = df.loc[mask, "mrr_eur"] * 12.0
-    src[mask] = "MRRx12"
-    conf[mask] = "Medium"
+    # 3) MRR (medium) — MRR*12
+    if "mrr_eur" in df.columns:
+        m = est.isna() & df["mrr_eur"].notna() & (df["mrr_eur"] > 0)
+        est[m] = df.loc[m, "mrr_eur"] * 12.0
+        src[m] = "mrr_x12"
+        conf[m] = "Medium"
 
-    # 4) GMV x take-rate (use defaults if missing)
-    default_take = {
-        "Consumer": 8.0,   # marketplaces
-        "Fintech": 2.0,    # payments
-        "B2B SaaS": 100.0, # GMV rarely applies; if present assume it's revenue
-        "AI-native": 100.0,
-        "Healthtech": 30.0,
-        "Climate": 20.0,
-        "Deeptech": 100.0
-    }
-    take = df["assumed_take_rate_pct"].copy()
-    take = take.where(take.notna(), df["sector"].map(default_take))
-    mask = est.isna() & df["gmv_eur"].notna() & (df["gmv_eur"] > 0) & take.notna()
-    est[mask] = df.loc[mask, "gmv_eur"] * (take[mask] / 100.0)
-    src[mask] = "GMVxTakeRate"
-    conf[mask] = "Low-Med"
-
-    # 5) Headcount model (rough sector benchmarks for revenue/employee)
-    rev_per_emp = {
-        "B2B SaaS": 160000.0,
-        "AI-native": 150000.0,
-        "Fintech": 180000.0,
-        "Consumer": 120000.0,
-        "Healthtech": 170000.0,
-        "Climate": 200000.0,
-        "Deeptech": 220000.0,
-    }
-    bench = df["sector"].map(rev_per_emp)
-    mask = est.isna() & df["headcount"].notna() & (df["headcount"] > 0) & bench.notna()
-    est[mask] = df.loc[mask, "headcount"] * bench[mask]
-    src[mask] = "HeadcountModel"
-    conf[mask] = "Low"
+    # 4) GMV * take-rate (low) — if both are available
+    if "gmv_eur" in df.columns and "assumed_take_rate_pct" in df.columns:
+        tr = pd.to_numeric(df["assumed_take_rate_pct"], errors="coerce") / 100.0
+        m = est.isna() & df["gmv_eur"].notna() & (df["gmv_eur"] > 0) & tr.notna() & (tr > 0)
+        est[m] = df.loc[m, "gmv_eur"] * tr[m]
+        src[m] = "gmv_take_rate"
+        conf[m] = "Low"
 
     df["estimated_revenue_eur"] = est
-    df["rev_source"] = src
-    df["confidence"] = conf
+    df["rev_source"] = df.get("rev_source", src).fillna(src)
+    df["confidence"] = df.get("confidence", conf).fillna(conf)
     return df
 
-def compute_startup_vgi(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
-    """Per-startup VGI = (startup EV/Rev) / (sector public EV/Rev),
-    using estimated revenue with confidence tiers."""
-    # Enrich with estimated revenue and confidence
-    per = estimate_revenue(cf)
 
-    # Normalize startup column name
-    if "startup" not in per.columns and "startup_name" in per.columns:
-        per = per.rename(columns={"startup_name": "startup"})
+def sector_public_median(pc: pd.DataFrame, min_n: int = 1) -> pd.DataFrame:
+    """Pick a single consistent method per sector, then compute median EV/Revenue."""
+    df = pc.copy()
+    # Determine dominant method per sector
+    method_counts = (
+        df.dropna(subset=["sector", "ev_to_revenue"])
+          .groupby(["sector", "ev_rev_method"], dropna=False)
+          .size()
+          .reset_index(name="n")
+    )
+    # pick method with max n per sector
+    winners = method_counts.sort_values(["sector", "n"], ascending=[True, False]) \
+                           .drop_duplicates("sector")[["sector", "ev_rev_method"]]
+    df = df.merge(winners, on="sector", how="left", suffixes=("", "_chosen"))
+    # keep only chosen method rows
+    df = df[df["ev_rev_method"] == df["ev_rev_method_chosen"]]
+    # median per sector
+    agg = (
+        df.dropna(subset=["ev_to_revenue"])
+          .groupby("sector")
+          .agg(public_median_ev_rev=("ev_to_revenue", "median"),
+               public_n=("ev_to_revenue", "count"),
+               public_method_used=("ev_rev_method", "first"))
+          .reset_index()
+    )
+    # filter coverage
+    agg = agg[agg["public_n"] >= min_n]
+    return agg
 
-    # Ensure numeric types
-    for c in ["valuation_pre_money_eur", "estimated_revenue_eur"]:
-        if c in per.columns:
-            per[c] = pd.to_numeric(per[c], errors="coerce")
 
-    # Avoid division by zero / negatives
-    per.loc[per["estimated_revenue_eur"] <= 0, "estimated_revenue_eur"] = pd.NA
-
-    # CF proxy EV/Rev per startup (now uses estimated revenue)
-    per["startup_ev_rev"] = per.get("valuation_pre_money_eur") / per.get("estimated_revenue_eur")
-
-    # Use the SAME consistent public medians per sector (MVP: min_n=1)
-    pub = sector_public_median_by_consistent_method(pc, min_n=1)
-
-    out = per.merge(pub[["sector", "public_median_ev_rev"]], on="sector", how="left")
+def compute_vgi(cf: pd.DataFrame, pc: pd.DataFrame) -> pd.DataFrame:
+    """Compute startup_ev_rev and VGI per startup, joining sector public medians."""
+    cf2 = estimate_revenue(cf)
+    cf2["startup_ev_rev"] = cf2["valuation_pre_money_eur"] / cf2["estimated_revenue_eur"]
+    pub = sector_public_median(pc, min_n=1)
+    out = cf2.merge(pub, on="sector", how="left")
     out["VGI"] = out["startup_ev_rev"] / out["public_median_ev_rev"]
-    out.replace([float("inf"), -float("inf")], pd.NA, inplace=True)
     return out
-# ---------------------------- UI ---------------------------------------------
+
+
+# ------------------------------- Unified Loader -------------------------------
+
+def load_data() -> tuple[pd.DataFrame, pd.DataFrame, str, str, list[str], list[str]]:
+    cf, cf_src_notes = None, []
+    pc, pc_src_notes = None, []
+
+    cf, cf_source, cf_src_notes = load_crowdfunding()
+    pc, pc_source, pc_src_notes = load_public_comps()
+
+    return cf, pc, cf_source, pc_source, cf_src_notes, pc_src_notes
+
+
+# ------------------------------- UI -------------------------------
+
+st.set_page_config(page_title="Startup Value Monitor — VGI (MVP)", layout="wide")
 
 def main():
-    # Load both datasets in one go
-    cf, pc, source = load_data()
-    st.caption(f"Crowdfunding source: {source} • rows: {len(cf)}")
-
-    # Diagnostics: crowdfunding sample
-    with st.expander("Diagnostics: crowdfunding data sample", expanded=False):
-        if isinstance(cf, pd.DataFrame) and not cf.empty:
-            st.write(cf.head(10))
-            st.write("Columns:", list(cf.columns))
-        else:
-            st.write("No crowdfunding rows loaded.")
-
-    # Diagnostics: sector coverage
-    with st.expander("Diagnostics: sector coverage", expanded=False):
-        if isinstance(cf, pd.DataFrame) and not cf.empty and "sector" in cf.columns:
-            st.write("Crowdfunding sectors:", cf["sector"].value_counts(dropna=False))
-        else:
-            st.write("Crowdfunding sectors: none")
-
-        if isinstance(pc, pd.DataFrame) and not pc.empty and "sector" in pc.columns:
-            st.write("Public comps sectors:", pc["sector"].value_counts(dropna=False))
-        else:
-            st.write("Public comps sectors: none")
-    st.set_page_config(page_title="Startup Value Monitor", layout="wide")
     st.title("Startup Value Monitor — VGI (MVP)")
     st.caption("Comparing crowdfunding valuations with public-market multiples.")
 
-    cf, pc, source = load_data()
-    st.caption(f"Public comps source: {source}")
+    # Data
+    cf, pc, cf_source, pc_source, cf_notes, pc_notes = load_data()
 
-    # --- Sector-level summary & charts
-    df = compute_vgi(sector_summary(cf, pc))
+    # Banners
+    st.info(f"Crowdfunding source: {cf_source} • rows: {len(cf)}")
+    st.info(f"Public comps source: {pc_source} • rows: {len(pc)}")
 
-    c1, c2 = st.columns([2, 1], vertical_alignment="center")
-    with c1:
-        st.subheader("Valuation Gap Index (by sector)")
-        bar = alt.Chart(df.dropna(subset=["VGI"])).mark_bar().encode(
-            x=alt.X("sector:N", sort="-y", title="Sector"),
-            y=alt.Y("VGI:Q", title="VGI = CF EV/Rev ÷ Public EV/Rev"),
-            tooltip=[
-                "sector",
-                alt.Tooltip("VGI:Q", format=".2f"),
-                alt.Tooltip("cf_ev_rev:Q", title="CF EV/Rev", format=".2f"),
-                alt.Tooltip("public_median_ev_rev:Q", title="Public EV/Rev", format=".2f"),
-                "public_method_used:N",
-                "public_n_used:Q",
-            ],
+    # Charts only if we have some coverage
+    if not cf.empty and not pc.empty:
+        # Compute per-startup VGI
+        per = compute_vgi(cf, pc)
+
+        # Sector-level VGI chart
+        sector_vgi = (
+            per.dropna(subset=["VGI"])
+               .groupby("sector")
+               .agg(vgi=("VGI", "median"), n=("VGI", "count"))
+               .reset_index()
+               .sort_values("vgi", ascending=False)
         )
-        st.altair_chart(bar, use_container_width=True)
-    with c2:
-        st.metric("Median VGI (all sectors)", f"{df['VGI'].median(skipna=True):.2f}")
-
-    with st.expander("Public comps: method and coverage per sector"):
-        st.dataframe(
-            df[["sector", "public_median_ev_rev", "public_method_used", "public_n_used"]]
-              .sort_values("sector")
-              .assign(public_median_ev_rev=lambda d: d["public_median_ev_rev"].round(2))
-        )
-
-    # --- Layered scatter: sector medians + per-startup points
-    st.markdown("---")
-    st.subheader("Crowdfunding Pre-Money vs Public EV/Revenue (by sector)")
-
-    # Background: sector medians (one dot per sector)
-    sector_scatter = alt.Chart(
-        df.dropna(subset=["public_median_ev_rev", "cf_median_pre_money"])
-    ).mark_circle(size=200, opacity=0.35).encode(
-        x=alt.X("public_median_ev_rev:Q", title="Public EV/Revenue (median)"),
-        y=alt.Y("cf_median_pre_money:Q", title="Crowdfunding Pre-Money (median, €)"),
-        tooltip=[
-            "sector:N",
-            alt.Tooltip("cf_median_pre_money:Q", title="CF Pre-Money (median, €)", format=","),
-            alt.Tooltip("public_median_ev_rev:Q", title="Public EV/Rev (median)", format=".2f"),
-            alt.Tooltip("VGI:Q", title="Sector VGI", format=".2f"),
-        ],
-        color=alt.value("lightgray"),
-    )
-
-    # Foreground: per-startup points (each uses sector public median on X)
-    per_startup = compute_startup_vgi(cf, pc)
-    pts_source = per_startup.dropna(
-        subset=["public_median_ev_rev", "valuation_pre_money_eur", "startup"]
-    ).copy()
-
-    hover = alt.selection_point(fields=["startup"], on="mouseover", nearest=True, empty="none")
-
-    startup_points = alt.Chart(pts_source).mark_circle(size=45).encode(
-        x=alt.X("public_median_ev_rev:Q", title="Public EV/Revenue (median)"),
-        y=alt.Y("valuation_pre_money_eur:Q", title="Crowdfunding Pre-Money (€)"),
-        tooltip=[
-            "startup:N",
-            "sector:N",
-            alt.Tooltip("valuation_pre_money_eur:Q", title="Pre-Money (€)", format=","),
-            alt.Tooltip("public_median_ev_rev:Q", title="Public EV/Rev (median)", format=".2f"),
-            alt.Tooltip("VGI:Q", title="Startup VGI", format=".2f"),
-        ],
-        color=alt.condition(hover, "sector:N", alt.value("lightgray")),
-        opacity=alt.condition(hover, alt.value(1.0), alt.value(0.35)),
-    ).add_params(hover)
-
-    layered = (sector_scatter + startup_points).properties(height=420)
-    st.altair_chart(layered, use_container_width=True)
-
-    # --- All startups included in VGI (by sector)
-    st.markdown("---")
-    st.subheader("All startups included in VGI (by sector)")
-
-    sectors = sorted(per_startup["sector"].dropna().unique().tolist())
-    if not sectors:
-        st.info("No sectors available yet. Add crowdfunding rows and public comps, then rerun.")
-    else:
-        chosen = st.selectbox("Pick a sector", options=sectors, index=0)
-
-        used = per_startup[
-            (per_startup["sector"] == chosen) & (per_startup["VGI"].notna())
-        ].copy()
-        total_in_sector = int((per_startup["sector"] == chosen).sum())
-        st.caption(f"{len(used)} startups shown (valid VGI) out of {total_in_sector} total rows in {chosen}.")
-
-        desired = [
-            "sector", "startup", "country",
-            "valuation_pre_money_eur", "revenue_last_fy_eur",
-            "startup_ev_rev", "public_median_ev_rev", "VGI",
-            "platform", "round_date",
-        ]
-        cols = [c for c in desired if c in used.columns]
-
-        if used.empty:
-            st.info("No startups with a valid VGI in this sector yet (need non-zero revenue and a public median).")
-        else:
-            # Format numbers and rename columns for readability
-            formatted = (
-                used[cols]
-                .sort_values("VGI", ascending=False)
-                .assign(
-                    VGI=lambda d: pd.to_numeric(d["VGI"], errors="coerce").round(2),
-                    startup_ev_rev=lambda d: pd.to_numeric(d["startup_ev_rev"], errors="coerce").round(2),
-                    public_median_ev_rev=lambda d: pd.to_numeric(d["public_median_ev_rev"], errors="coerce").round(2),
-                    valuation_pre_money_eur=lambda d: pd.to_numeric(d["valuation_pre_money_eur"], errors="coerce").round(0),
-                    revenue_last_fy_eur=lambda d: pd.to_numeric(d.get("revenue_last_fy_eur"), errors="coerce").round(0),
-                    estimated_revenue_eur=lambda d: pd.to_numeric(d.get("estimated_revenue_eur"), errors="coerce").round(0),
-                )
-                .rename(columns={
-                    "startup": "Startup",
-                    "country": "Country",
-                    "sector": "Sector",
-                    "valuation_pre_money_eur": "Pre-Money (€)",
-                    "revenue_last_fy_eur": "Revenue (Last FY, €)",
-                    "estimated_revenue_eur": "Revenue (Estimated, €)",
-                    "startup_ev_rev": "CF EV/Rev",
-                    "public_median_ev_rev": "Public EV/Rev (median)",
-                    "VGI": "VGI (×)",
-                    "platform": "Platform",
-                    "round_date": "Round date",
-                    "rev_source": "Revenue source",
-                    "confidence": "Confidence",
-                })
+        if not sector_vgi.empty:
+            st.subheader("Valuation Gap Index (by sector)")
+            chart = (
+                alt.Chart(sector_vgi)
+                  .mark_bar()
+                  .encode(
+                      x=alt.X("sector:N", sort="-y", title="Sector"),
+                      y=alt.Y("vgi:Q", title="VGI = CF EV/Rev ÷ Public EV/Rev"),
+                      tooltip=["sector:N", alt.Tooltip("vgi:Q", format=".2f"), "n:Q"]
+                  )
+                  .properties(height=300)
             )
+            st.altair_chart(chart, use_container_width=True)
 
-            # Prefer estimated revenue column if present
-            display_cols = [c for c in [
-                "Sector","Startup","Country",
-                "Pre-Money (€)","Revenue (Estimated, €)","Revenue (Last FY, €)",
-                "CF EV/Rev","Public EV/Rev (median)","VGI (×)",
-                "Revenue source","Confidence","Platform","Round date"
-            ] if c in formatted.columns]
-            st.dataframe(formatted[display_cols], use_container_width=True)
-            
-            # CSV download for this sector
-            csv = formatted[display_cols].to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label=f"Download startups used for {chosen} (CSV)",
-                data=csv,
-                file_name=f"vgi_startups_{chosen}.csv",
-                mime="text/csv",
+            overall = sector_vgi["vgi"].median() if not sector_vgi.empty else float("nan")
+            st.metric("Median VGI (all sectors)", f"{overall:.2f}" if not math.isnan(overall) else "—")
+
+        # Scatter: CF Pre-Money vs Public EV/Revenue (sector medians)
+        pub = sector_public_median(pc, min_n=1)
+        if not pub.empty:
+            st.subheader("Crowdfunding Pre-Money vs Public EV/Revenue (by sector)")
+            agg_cf = (
+                per.dropna(subset=["valuation_pre_money_eur"])
+                   .groupby("sector")
+                   .agg(cf_median_premoney=("valuation_pre_money_eur", "median"))
+                   .reset_index()
             )
-
-        # Transparency: which public comps were used for this sector’s median?
-        st.markdown("**Public comps used for this sector’s median (method-consistent)**")
-        pc_med = sector_public_median_by_consistent_method(pc, min_n=1)
-        meta = pc_med.set_index("sector").to_dict(orient="index")
-        method = meta.get(chosen, {}).get("public_method_used", None)
-
-        if method and method != "insufficient" and "ev_rev_method" in pc.columns:
-            comps_used = pc[
-                (pc["sector"] == chosen)
-                & (pc["ev_rev_method"] == method)
-                & (pc["ev_to_revenue"].notna())
-            ].copy()
-            comp_cols = [c for c in ["ticker", "country", "ev_rev_method", "ev_to_revenue", "data_date"] if c in comps_used.columns]
-            if not comps_used.empty:
-                st.dataframe(
-                    comps_used[comp_cols].assign(
-                        ev_to_revenue=lambda d: pd.to_numeric(d["ev_to_revenue"], errors="coerce").round(2)
-                    ).sort_values("ev_to_revenue"),
-                    use_container_width=True,
+            bubble = agg_cf.merge(pub, on="sector", how="inner")
+            if not bubble.empty:
+                scatter = (
+                    alt.Chart(bubble)
+                       .mark_circle()
+                       .encode(
+                           x=alt.X("public_median_ev_rev:Q", title="Public EV/Revenue (median)"),
+                           y=alt.Y("cf_median_premoney:Q", title="Crowdfunding Pre-Money (median, €)"),
+                           size=alt.Size("public_n:Q", title="# comps"),
+                           color=alt.Color("sector:N", legend=None),
+                           tooltip=[
+                               "sector:N",
+                               alt.Tooltip("public_median_ev_rev:Q", title="Public EV/Rev (median)", format=".2f"),
+                               alt.Tooltip("cf_median_premoney:Q", title="CF Pre-Money (median €)", format=",.0f"),
+                               alt.Tooltip("public_n:Q", title="Comps used")
+                           ],
+                       )
+                       .properties(height=360)
                 )
+                st.altair_chart(scatter, use_container_width=True)
+
+        # All startups (sector table)
+        st.subheader("All startups included in VGI (by sector)")
+        sectors = sorted(per["sector"].dropna().unique().tolist())
+        if sectors:
+            chosen = st.selectbox("Pick a sector", options=sectors, index=0)
+            used = per[(per["sector"] == chosen) & per["VGI"].notna()].copy()
+
+            desired = [
+                "sector", "startup", "country",
+                "valuation_pre_money_eur", "estimated_revenue_eur",
+                "startup_ev_rev", "public_median_ev_rev", "VGI",
+                "rev_source", "confidence", "platform", "round_date",
+            ]
+            cols = [c for c in desired if c in used.columns]
+
+            st.caption(f"{len(used)} startups shown (valid VGI) out of { (per['sector'] == chosen).sum() } total rows in {chosen}.")
+            if used.empty:
+                st.info("No startups with a valid VGI in this sector yet (need non-zero revenue and a public median).")
             else:
-                st.info("No valid comps found yet for the chosen method; add/refresh the watchlist.")
+                formatted = (
+                    used[cols]
+                    .sort_values("VGI", ascending=False)
+                    .assign(
+                        VGI=lambda d: d["VGI"].round(2),
+                        startup_ev_rev=lambda d: d["startup_ev_rev"].round(2),
+                        public_median_ev_rev=lambda d: d["public_median_ev_rev"].round(2),
+                    )
+                    .rename(columns={
+                        "valuation_pre_money_eur": "Pre-money (€)",
+                        "estimated_revenue_eur": "Revenue est. (€)",
+                        "startup_ev_rev": "CF EV/Rev",
+                        "public_median_ev_rev": "Public EV/Rev (median)",
+                        "rev_source": "Revenue source",
+                        "confidence": "Confidence",
+                        "round_date": "Round date"
+                    })
+                )
+                order = [
+                    "sector", "startup", "country",
+                    "Pre-money (€)", "Revenue est. (€)",
+                    "CF EV/Rev", "Public EV/Rev (median)", "VGI",
+                    "Revenue source", "Confidence", "platform", "Round date"
+                ]
+                display_cols = [c for c in order if c in formatted.columns]
+                st.dataframe(formatted[display_cols], use_container_width=True)
         else:
-            st.info("Public comps coverage is insufficient for a consistent median in this sector.")
+            st.info("No sectors available — add data to your feed(s).")
 
-    # --- Notes
-    st.markdown("---")
-    st.write("**Notes**")
-    st.write("- Public comps median uses a single consistent method per sector (shown above).")
-    st.write("- Replace sample crowdfunding CSVs with real data next.")
-    st.write("- In production, compute EV/Revenue per round and aggregate by sector/country.")
+    else:
+        st.warning("Not enough data yet — ensure both CF and Public comps have rows.")
+
+    # --------------------------------- Diagnostics (bottom) ---------------------------------
+    st.divider()
+    st.caption("Diagnostics")
+    with st.expander("Crowdfunding diagnostics", expanded=False):
+        st.write("Notes:", cf_notes if cf_notes else "none")
+        st.write("Columns:", list(cf.columns))
+        st.write(cf.head(10))
+        st.write("Sectors:", cf["sector"].value_counts(dropna=False) if "sector" in cf.columns else "none")
+
+    with st.expander("Public comps diagnostics", expanded=False):
+        st.write("Notes:", pc_notes if pc_notes else "none")
+        st.write("Columns:", list(pc.columns))
+        st.write(pc.head(10))
+        st.write("Sectors:", pc["sector"].value_counts(dropna=False) if "sector" in pc.columns else "none")
 
 
 if __name__ == "__main__":
     main()
-
-
